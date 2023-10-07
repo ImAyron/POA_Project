@@ -39,7 +39,8 @@ def BpJsonAnalysis(file):
     #Remove any rows with NaN values in antigen columns
     mask = final_df['AA'].isna()
     final_df = final_df.loc[~mask]
-    
+    final_df.reset_index(drop=True, inplace=True)
+
     return(final_df)
 
 #Dataframe update with new lines
@@ -91,7 +92,6 @@ def bpAntigenEpitopes(dataframe, lenght_min, lenght_max):
     
     #Remove the "antigens" column
     df = df.drop(columns='antigens')
-
     #Selecting the score for antigenic amino acid prediction
     antigenic_list = []
     for line in range(len(df['PRED'])):

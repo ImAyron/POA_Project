@@ -7,12 +7,12 @@ import Bio
 
 #Verification of the viability of epitopes to be analyzed by conservancy analysis 
 def checkViability(lenght_seq_dict, dataframe, column_epitopes):
-    for line in dataframe[column_epitopes]:
-        line = str(line)
-        lenght_epitope = len(line)
+    for line in range(len(dataframe[column_epitopes])):
+        sequence = str(dataframe.iat[line, 6])
+        lenght_epitope = len(sequence)
         for seq in lenght_seq_dict:
             if lenght_seq_dict[seq] < lenght_epitope:
-                raise Exception(f"ERROR: The length of all epitope sequences must be less than the length of all protein sequences. The epitope {line} is longer than at least one protein sequence")
+                raise Exception(f"ATTENTION: Some of your epitopes (Ex: {dataframe.iat[line, 4]}_{dataframe.iat[line, 5]} ({dataframe.iat[line, 2]}, {dataframe.iat[line, 1]})) have a length greater than the size of the sequence of at least one of the proteins analyzed. Due to the possibility of causing issues in the subsequent analysis (conservation analysis), please reduce the maximum accepted size for the epitopes or consider excluding the protein with the fewest amino acids from the analysis.")
         
 #Checking the Sequence Integrity 
 def checkIntegrity(file):
@@ -137,14 +137,15 @@ def main():
         lenght_seq = len(sequence)
         lenght_seq_dict[ID_sequence] = lenght_seq
 
+    
     #organize prediction results
     results_df = PrEpiAn.runningPrEpiAn(args)
 
-    #Analysis Report
-    writereport(results_df, args.d)
-
     #Checking if all epitopes are smaller than proteins in analysis
     checkViability(lenght_seq_dict, results_df, "Peptide Sequence")
+
+    #Analysis Report
+    writereport(results_df, args.d)
 
     #Organize data for Epitope Conservancy Analysis
     prepianResultsforConservancyAnalysis.filesforEptConsAnalysis(args.f, results_df, args.d)
