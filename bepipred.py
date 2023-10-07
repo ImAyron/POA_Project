@@ -19,7 +19,7 @@ def BpJsonAnalysis(file):
         for info in dataJS['antigens'][specie]:
             if info not in data:
                 data.append(info)
-
+    
     #Create a new DataFrame for results
     final_df = pd.DataFrame()
     final_df = pd.DataFrame(columns=data)
@@ -35,7 +35,13 @@ def BpJsonAnalysis(file):
                 df = pd.concat([df,df1], ignore_index=False, axis=1)
         #Merge the two Dataframes (Dataframe for prediction data of single sequence and global Dataframe)
         final_df = pd.merge(final_df, df, how = 'outer')
+    
+    #Remove any rows with NaN values in antigen columns
+    mask = final_df['AA'].isna()
+    final_df = final_df.loc[~mask]
+    
     return(final_df)
+
 #Dataframe update with new lines
 def dfUpdate(df, line_number, InPos, Epitope, new_df, index):
     new_line = [    
@@ -64,9 +70,8 @@ def bpAntigenEpitopes(dataframe, lenght_min, lenght_max):
             idseq.append(line) 
         else: #Map positions with Nan and replace them with sequence data
             idseq.append(etiqueta)
-
     slice_df = slice_df.assign(antigens = idseq) #Update the column with collected data
-
+    
     #Get information on species, proteins and ID sequence via the "antigens" column.
     prot = [];  sp = []; idSeqNumber = []
     for line in slice_df['antigens']:
@@ -74,18 +79,18 @@ def bpAntigenEpitopes(dataframe, lenght_min, lenght_max):
         prot.append(dataID[0]) 
         sp.append(dataID[1])
         if len(dataID) >= 4:
-            if dataID[2] == "NP":
-                idSeqNumber.append(dataID[2] + "_" + dataID[3])
+            idSeqNumber.append(dataID[2] + "_" + dataID[3])
         else:
             idSeqNumber.append(dataID[2])
+    
     #Add new columns in the Dataframe
     slice_df['Specie'] = sp
     slice_df['Protein'] = prot
     slice_df['ID_Sequence'] = idSeqNumber
-
     df = slice_df
+    
     #Remove the "antigens" column
-    df = df.drop('antigens', 1)
+    df = df.drop(columns='antigens')
 
     #Selecting the score for antigenic amino acid prediction
     antigenic_list = []
@@ -94,6 +99,7 @@ def bpAntigenEpitopes(dataframe, lenght_min, lenght_max):
             antigenic_list.append('Epitope')
         else:
             antigenic_list.append('-')
+    
     #Add a new column to characterize amino acid residues that are antigenic
     df['Classif'] = antigenic_list
 
