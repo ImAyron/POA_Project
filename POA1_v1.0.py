@@ -5,8 +5,20 @@ import os
 import PrEpiAn
 import Bio
 
-#Verification of the viability of epitopes to be analyzed by conservancy analysis 
 def checkViability(lenght_seq_dict, dataframe, column_epitopes):
+    """
+    Verifies the viability of epitopes for conservancy analysis by ensuring that no epitope is longer
+    than the shortest protein sequence in the dataset. If an epitope exceeds the length of any protein,
+    an exception is raised to prevent errors in downstream analyses.
+
+    Parameters:
+        lenght_seq_dict (dict): A dictionary mapping protein IDs to their sequence lengths.
+        dataframe (pd.DataFrame): A DataFrame containing the predicted epitopes.
+        column_epitopes (str): The name of the column in the DataFrame that contains the epitope sequences.
+
+    Raises:
+        Exception: If any epitope is longer than the shortest protein sequence.
+    """
     for line in range(len(dataframe[column_epitopes])):
         sequence = str(dataframe.iat[line, -1])
         lenght_epitope = len(sequence)
@@ -14,8 +26,19 @@ def checkViability(lenght_seq_dict, dataframe, column_epitopes):
             if lenght_seq_dict[seq] < lenght_epitope:
                 raise Exception(f"ATTENTION: Some of your epitopes (Ex: {dataframe.iat[line, 4]}_{dataframe.iat[line, 5]} ({dataframe.iat[line, 2]}, {dataframe.iat[line, 1]})) have a length greater than the size of the sequence of at least one of the proteins analyzed. Due to the possibility of causing issues in the subsequent analysis (conservation analysis), please reduce the maximum accepted size for the epitopes or consider excluding the protein with the fewest amino acids from the analysis.")
         
-#Checking the Sequence Integrity 
 def checkIntegrity(file):
+    """
+    Checks the integrity of protein sequences in a FASTA file by searching for invalid characters (e.g., 'x').
+    If an invalid character is found, the function returns a flag and the ID of the problematic sequence.
+
+    Parameters:
+        file (str): Path to the FASTA file containing protein sequences.
+
+    Returns:
+        tuple: A tuple containing:
+            - verif (bool): True if an invalid character is found, False otherwise.
+            - ID_sequence (str): The ID of the sequence containing the invalid character.
+    """
     from Bio import SeqIO
     verif = False
     for seq_record in SeqIO.parse(file, "fasta"):
@@ -27,9 +50,21 @@ def checkIntegrity(file):
             return (verif, ID_sequence)
     return (verif, '')
         
-
-#Write epitope analysis report within the pipeline 
 def writereport(dataframe, path):
+    """
+    Generates a detailed analysis report summarizing the predicted epitopes, including statistics such as:
+    - Number of species and proteins analyzed.
+    - Total number of epitopes.
+    - Proteins with the highest and lowest number of epitopes.
+    - Average length of epitopes.
+
+    Parameters:
+        dataframe (pd.DataFrame): A DataFrame containing the predicted epitopes and their metadata.
+        path (str): Directory where the report will be saved.
+
+    Output:
+        A text file named "Analysis_report.txt" containing the analysis summary.
+    """
     import math
     from datetime import datetime
     now = datetime.now()
@@ -92,16 +127,37 @@ def writereport(dataframe, path):
         report.write(f"{int(average_length)} aa.")
     
 def main():
-    
+    """
+    Main function of the POA1, first stage of POA pipeline. Parses command-line arguments, validates input data, and orchestrates
+    the analysis of predicted epitopes. It also generates an analysis report and prepares data for conservancy analysis.
+
+    Command-line arguments:
+        -b2: Bepipred-2.0 prediction results in JSON format.
+        -b3: Bepipred-3.0 prediction results in FASTA format.
+        -bmin: Minimum length of Bepipred epitopes (default = 0).
+        -bmax: Maximum length of Bepipred epitopes (default = 0).
+        -p: PAP-IMED prediction results in TXT format.
+        -pmin: Minimum length of PAP-IMED epitopes (default = 0).
+        -pmax: Maximum length of PAP-IMED epitopes (default = 0).
+        -n: NetCTL prediction results in HTML format.
+        -m: Directory containing MHC-II Binding Predictions in HTML format.
+        -mhla: HLA-type allele for MHC-II predictions (default = DR).
+        -mic: IC50 threshold for NN_align 2.3 (default = 50).
+        -x: Prediction results from other tools in FASTA format.
+        -xmin: Minimum length of epitopes from other tools (default = 0).
+        -xmax: Maximum length of epitopes from other tools (default = 0).
+        -d: Directory to store analysis results.
+        -f: FASTA file containing polyproteins/proteins used in predictions.
+        -e: Option to export results in .xlsx format (default = 'n').
+
+    Raises:
+        Exception: If no prediction method is provided or if invalid characters are found in the protein sequences.
+    """
     parser = argparse.ArgumentParser(add_help=False)
     parser._action_groups.pop()
     required = parser.add_argument_group('required arguments (at least one prediction method)')
     optional = parser.add_argument_group('optional arguments')
     required.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS, help= "Print this help message.")
-    required.add_argument("-n", help= "NetCTL prediction in HTML format", type=str, default='')
-    required.add_argument("-m", help= "Directory for MHC-II Binding Predictions in HTML format", type=str, default='')
-    optional.add_argument("-mhla", help="HLA-type allele of the predicted MHC-II Binding Predictions Epitopes  (default = DR)", type=str, default = 'DR')
-    optional.add_argument("-mic", help="IC50 threshold - NN_align 2.3 (default = 50), High binding peptides", type=int, default = 50) 
     required.add_argument("-b2", help= "Bepipred-2.0 prediction in JSON format", type=str, default='')
     required.add_argument("-b3", help= "Bepipred-3.0 prediction in FASTA format", type=str, default='')
     optional.add_argument("-bmin", help="Min. Length (MERS) of the predicted Bepipred Epitopes  (default = 0)", type=int, default=0)
@@ -109,6 +165,10 @@ def main():
     required.add_argument("-p", help= "PAP-IMED prediction in TXT format", type=str, default='')
     optional.add_argument("-pmin", help="Min. Length (MERS) of the predicted PAP-IMED Epitopes  (default = 0)", type=int, default=0)
     optional.add_argument("-pmax", help="Max. Length (MERS) of the predicted PAP-IMED Epitopes  (default = 0)", type=int, default=0)
+    required.add_argument("-n", help= "NetCTL prediction in HTML format", type=str, default='')
+    required.add_argument("-m", help= "Directory for MHC-II Binding Predictions in HTML format", type=str, default='')
+    optional.add_argument("-mhla", help="HLA-type allele of the predicted MHC-II Binding Predictions Epitopes  (default = DR)", type=str, default = 'DR')
+    optional.add_argument("-mic", help="IC50 threshold - NN_align 2.3 (default = 50), High binding peptides", type=int, default = 50) 
     required.add_argument("-x", help= "Prediction in others web servers (in FASTA format)", type=str, default='')
     optional.add_argument("-xmin", help="Min. Length (MERS) of the results predicted in others web servers  (default = None)", type=int, default=0)
     optional.add_argument("-xmax", help="Max. Length (MERS) of the results predicted in others web servers  (default = None)", type=int, default=0)
@@ -138,7 +198,6 @@ def main():
         lenght_seq = len(sequence)
         lenght_seq_dict[ID_sequence] = lenght_seq
 
-    
     #organize prediction results
     results_df = PrEpiAn.runningPrEpiAn(args)
 
@@ -149,7 +208,7 @@ def main():
     writereport(results_df, args.d)
 
     #Organize data for Epitope Conservancy Analysis
-    prepianResultsforConservancyAnalysis.filesforEptConsAnalysis(args.f, results_df, args.d)
+    prepianResultsforConservancyAnalysis.filesforEptConsAnalysis(results_df, args.d)
 
     print("Data collected and analyzed...\n")
     print(".\n.\n.\n.\n.\n.\n.\n")

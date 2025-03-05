@@ -16,20 +16,20 @@ def bp2_JsonAnalysis(file):
         pd.DataFrame: DataFrame containing sequence information and prediction results.
     """
 
-    # Load JSON data
+    #Load JSON data
     with open(file, 'r') as rawData:
         dataJS = json.load(rawData)
       
-    # Extract sequence IDs
+    #Extract sequence IDs
     ID_seqs = list(dataJS['antigens'].keys())
 
-    # Define headers based on available information in the JSON file
+    #Define headers based on available information in the JSON file
     headers = ['antigens'] + list(next(iter(dataJS['antigens'].values())).keys())
 
-    # Initialize DataFrame to store results
+    #Initialize DataFrame to store results
     final_df = pd.DataFrame(columns=headers)
 
-    # Populate DataFrame with each sequence's prediction data
+    #Populate DataFrame with each sequence's prediction data
     for seq in ID_seqs:
         df1 = pd.DataFrame({'antigens': [seq]})
         for header in headers[1:]:
@@ -38,11 +38,10 @@ def bp2_JsonAnalysis(file):
             df1 = pd.concat([df1, df2], axis=1)
         final_df = pd.concat([final_df, df1], ignore_index=True)
 
-    # Remove rows with NaN values in the "AA" column
+    #Remove rows with NaN values in the "AA" column
     final_df = final_df.dropna(subset=['AA']).reset_index(drop=True)
     return final_df
 
-# Update DataFrame with a new row of epitope information
 def bp2_dfUpdate(df, line_number, InPos, Epitope, new_df, index):
     """
     Updates a DataFrame with new epitope information.
@@ -69,7 +68,6 @@ def bp2_dfUpdate(df, line_number, InPos, Epitope, new_df, index):
     new_df.loc[index] = new_row
     return new_df
 
-# Extract epitope information from Bepipred-2.0 predictions in a DataFrame
 def bp2_AntigenEpitopes(dataframe):
     """
     Extracts epitope data from a DataFrame containing Bepipred-2.0 predictions.
@@ -82,7 +80,7 @@ def bp2_AntigenEpitopes(dataframe):
     """
     slice_df = dataframe[['antigens', 'AA', 'PRED']].copy()
     
-    # Standardize and map ID sequence information
+    #Standardize and map ID sequence information
     idseq = []
     current_id = None
     for line in slice_df['antigens']:
@@ -90,16 +88,16 @@ def bp2_AntigenEpitopes(dataframe):
         idseq.append(current_id)
     slice_df['antigens'] = idseq
 
-    # Parse species, protein, and sequence ID information
+    #Parse species, protein, and sequence ID information
     slice_df[['Protein', 'Specie', 'ID_Sequence']] = slice_df['antigens'].str.extract(r'(\w+?)_(\w+?)_(\w+)')
    
-    # Classify residues as antigenic based on prediction score threshold
+    #Classify residues as antigenic based on prediction score threshold
     slice_df['Classif'] = np.where(slice_df['PRED'] > 0.5, 'Epitope', '-')
      
-    # Assign sequential positions to aa residue within each sequence
+    #Assign sequential positions to aa residue within each sequence
     slice_df['Position'] = slice_df.groupby('antigens').cumcount() + 1
     
-    # Filter and assemble antigenic regions
+    #Filter and assemble antigenic regions
     antigens_DF = slice_df[slice_df['Classif'] == 'Epitope'].reset_index(drop=True)
     results_df = pd.DataFrame(columns=['Specie', 'Protein', 'ID_Sequence', 'Initial Position', 'Final Position', 'Peptide Sequence'])
    
@@ -120,7 +118,6 @@ def bp2_AntigenEpitopes(dataframe):
     
     return results_df
 
-# Identify epitopes (uppercase segments) in a sequence
 def bp3_FindAntigens(sequence):
     """
     Identifies uppercase segments (antigen sequences) in a given sequence.
@@ -144,7 +141,6 @@ def bp3_FindAntigens(sequence):
 
     return antigens
 
-# Analyze FASTA file (output of Bepipred 3.0) and extract antigen information
 def bp3_FastaAnalysis(fastafile):
     """
     Processes a FASTA file output of Bepipred 3.0, identifies uppercase antigen segments, and records them.
@@ -168,11 +164,9 @@ def bp3_FastaAnalysis(fastafile):
 
     return pd.DataFrame(data, columns=["Specie", "Protein", "ID_Sequence", "Peptide Sequence", "Initial Position", "Final Position"])
 
-
-# Apply minimum and maximum length constraints to epitope data
 def finalresultsBepipred(results_df, length_min, length_max, BepipredVersion):
     """
-    Applies length constraints to predicted epitopes and sets the method version.
+    Applies length constraints to predicted epitopes and sets the method version in results DataFrame.
 
     Parameters:
         results_df (pd.DataFrame): DataFrame with epitope predictions.
