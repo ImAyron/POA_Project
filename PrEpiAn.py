@@ -21,14 +21,20 @@ def runningPrEpiAn(args):
     predictions = []
     #Analysis of epitopes predicted by Bepipred
     #Parsing the Json file
-    if (args.b) != '':
-        print("Collecting Bepipred-2.0 epitope data ...\n")
-        if (args.bmin) == 0 and (args.bmax) == 0:
-            bp_data = bepipred.BpJsonAnalysis(args.b)
-            Bp_df = bepipred.bpAntigenEpitopes(bp_data, 0, 0)
+    if (args.b2) != '' or (args.b3) != '':
+        if (args.b2) != '' and (args.b3) != '':
+            raise Exception(f"ERROR: Arguments -b2 and -b3 cannot be used simultaneously. Please select results from only one version of Bepipred for analysis at a time.")
         else:
-            bp_data = bepipred.BpJsonAnalysis(args.b)
-            Bp_df = bepipred.bpAntigenEpitopes(bp_data, args.bmin, args.bmax)
+            if (args.b2) != '':
+                print("Collecting Bepipred-2.0 epitope data ...\n")
+                bp_data = bepipred.bp2_JsonAnalysis(args.b2)
+                Bp_df = bepipred.bp2_AntigenEpitopes(bp_data)
+                Bp_df = bepipred.finalresultsBepipred (Bp_df, args.bmin, args.bmax, 0) 
+            else:
+                print("Collecting Bepipred-3.0 epitope data ...\n")
+                Bp_df = bepipred.bp3_FastaAnalysis(args.b3)
+                Bp_df = bepipred.finalresultsBepipred (Bp_df, args.bmin, args.bmax, 1) 
+
         checkIntegrity(Bp_df, 'Peptide Sequence', 'ID_Sequence')
         predictions.append(Bp_df)
         
@@ -94,7 +100,7 @@ def runningPrEpiAn(args):
     
     #result files (by method) in .xlsx format
     if (args.e).lower() == 'y':
-        if args.b != '':
+        if args.b2 != '' or args.b3 != '':
             Bp_df.to_excel(rf'{args.d}/Bepipred_Epitopes.xlsx', sheet_name = 'Prediction Results', startcol=0, index=False)
         if args.p != '':
             PAP_df.to_excel(rf'{args.d}/PAP_IMED_Epitopes.xlsx', sheet_name = 'Prediction Results', startcol=0, index=False)

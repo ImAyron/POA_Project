@@ -8,7 +8,7 @@ import Bio
 #Verification of the viability of epitopes to be analyzed by conservancy analysis 
 def checkViability(lenght_seq_dict, dataframe, column_epitopes):
     for line in range(len(dataframe[column_epitopes])):
-        sequence = str(dataframe.iat[line, 6])
+        sequence = str(dataframe.iat[line, -1])
         lenght_epitope = len(sequence)
         for seq in lenght_seq_dict:
             if lenght_seq_dict[seq] < lenght_epitope:
@@ -102,13 +102,14 @@ def main():
     required.add_argument("-m", help= "Directory for MHC-II Binding Predictions in HTML format", type=str, default='')
     optional.add_argument("-mhla", help="HLA-type allele of the predicted MHC-II Binding Predictions Epitopes  (default = DR)", type=str, default = 'DR')
     optional.add_argument("-mic", help="IC50 threshold - NN_align 2.3 (default = 50), High binding peptides", type=int, default = 50) 
-    required.add_argument("-b", help= "Bepipred-2.0 prediction in JSON format", type=str, default='')
+    required.add_argument("-b2", help= "Bepipred-2.0 prediction in JSON format", type=str, default='')
+    required.add_argument("-b3", help= "Bepipred-3.0 prediction in FASTA format", type=str, default='')
     optional.add_argument("-bmin", help="Min. Length (MERS) of the predicted Bepipred Epitopes  (default = 0)", type=int, default=0)
     optional.add_argument("-bmax", help="Max. Length (MERS) of the predicted Bepipred Epitopes  (default = 0)", type=int, default=0)
-    required.add_argument("-p", help= "PAP-IMED prediction in txt format", type=str, default='')
+    required.add_argument("-p", help= "PAP-IMED prediction in TXT format", type=str, default='')
     optional.add_argument("-pmin", help="Min. Length (MERS) of the predicted PAP-IMED Epitopes  (default = 0)", type=int, default=0)
     optional.add_argument("-pmax", help="Max. Length (MERS) of the predicted PAP-IMED Epitopes  (default = 0)", type=int, default=0)
-    required.add_argument("-x", help= "Prediction in others web servers (in fasta format)", type=str, default='')
+    required.add_argument("-x", help= "Prediction in others web servers (in FASTA format)", type=str, default='')
     optional.add_argument("-xmin", help="Min. Length (MERS) of the results predicted in others web servers  (default = None)", type=int, default=0)
     optional.add_argument("-xmax", help="Max. Length (MERS) of the results predicted in others web servers  (default = None)", type=int, default=0)
     required.add_argument("-d", help= "Directory for analysis results",required = "True", type=str, default='')
@@ -119,8 +120,8 @@ def main():
     print("PrEpiAn: Predicted Epitopes Analyzer v1.0" + "\n")
     
     #At least one argument must be selected.
-    if (args.b == '') and (args.p == '') and (args.n == '') and (args.m == '') and (args.x == ''):
-        raise Exception(f'ERROR: Some the following arguments are required: -n, -m, -b, -p')
+    if (args.b2 == '') and (args.b3 == '') and (args.p == '') and (args.n == '') and (args.m == '') and (args.x == ''):
+        raise Exception(f'ERROR: Some the following arguments are required: -n, -m, -b (-b2 or -b3), -p')
     
     #Checking for the presence of 'x' in the sequences 
     check, seq_X = checkIntegrity(args.f)
