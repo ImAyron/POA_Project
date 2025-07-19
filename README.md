@@ -35,7 +35,7 @@ POA v1.0 must be installed manually. Ensure all dependencies are installed for p
 * Biopython version 1.79
 * Html version 1.16
 * Json
-* pyTMHMM
+* pyTMHMM (This package needs manual installation. Please follow the instructions in [pyTMHMM tool](https://github.com/bosborne/pyTMHMM)) 
 
 To install POA v1.0 on Linux, use the following command:
 
