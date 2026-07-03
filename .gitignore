@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / caching
+.pytest_cache/
+.poa_cache/
+poa_cache/
+
+# POA runtime outputs (analysis directories created by users)
+/results/
+*.xlsx
+!tests/**/*.xlsx
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

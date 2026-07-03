@@ -1,0 +1,37 @@
+# ==========================================================================
+# POA — Pipeline de Otimização de Antígenos — Python dependencies
+# ==========================================================================
+# Install (recommended, cross-platform):
+#   python -m venv .venv && . .venv/bin/activate    # Windows: .venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# Some external predictors are NOT pip packages and are documented separately:
+#   * EMBOSS `antigenic` (replaces the offline PAP/IMED site) — install via conda/WSL/Docker:
+#       conda install -c bioconda emboss
+#   * BepiPred-3.0 local model — heavy (PyTorch + ESM-2), install on demand:
+#       pip install bp3
+#   * NetCTL 1.2 / BepiPred-2.0 have no API/Windows binary — automated via browser (Playwright)
+#     with manual upload as fallback.
+# --------------------------------------------------------------------------
+
+# --- core pipeline logic (already used by the original POA) ---
+pandas>=1.4          # epitope matrices, filtering, xlsx export
+numpy>=1.21          # numeric support for the BepiPred JSON parser
+biopython>=1.79      # SeqIO — FASTA parsing throughout the pipeline
+openpyxl>=3.0        # engine behind pandas.DataFrame.to_excel (was an implicit dependency)
+pyTMHMM              # transmembrane-helix topology in POA2 (membrane localization of epitopes)
+
+# --- external-service integration (new) ---
+requests>=2.28       # HTTP client for the IEDB MHC-II REST API
+
+# --- graphical interface (new) ---
+streamlit>=1.30      # local web GUI orchestrating the full pipeline
+plotly>=5.18         # interactive charts of the selected epitopes in the GUI
+
+# --- browser automation for tools without an API (new, optional) ---
+# Needed only for automating NetCTL 1.2 / BepiPred 2.0 web forms. After installing, run:
+#   playwright install chromium
+playwright>=1.40
+
+# --- development / tests ---
+pytest>=7.0          # unit tests for the parsers and ranking/filtering logic
