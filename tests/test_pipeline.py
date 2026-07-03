@@ -39,9 +39,9 @@ def test_run_poa1_end_to_end(tmp_path):
     assert len(result.predictions) == 3
     assert set(result.predictions["Method"]) == {"Bepipred3.0", "CTLPRED"}
 
-    # report written
+    # report written (UTF-8, so Portuguese accents are preserved)
     assert os.path.exists(result.report_path)
-    report_text = open(result.report_path).read()
+    report_text = open(result.report_path, encoding="utf-8").read()
     assert "POA - Pipeline de Otimização de Antígenos" in report_text
     assert "Total:\t3" in report_text
 
