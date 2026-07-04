@@ -3,6 +3,60 @@
 ### English
 This is the English version of the README. For the Portuguese (PT-BR) version, please refer to the section below.
 
+## 0. AUTOMATION & GRAPHICAL INTERFACE (v1.1)
+
+> This release adds an optional automation layer and a graphical interface **without changing the
+> scientific ranking/selection logic**. The original command line still works exactly as before.
+> The full design and per-tool automation strategy are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+**Package layout** (refactored into layers; the flat scripts became thin shims):
+`poa/core` (parsing + pipeline logic, no network) · `poa/services` (external tools) ·
+`poa/cli` (POA1/POA2, same arguments) · `poa/gui` (Streamlit app).
+
+**Install**
+```
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+```
+Extras that are not pip packages / are heavy (install only if you want that automation):
+* **EMBOSS `antigenic`** (replaces the offline PAP/IMED site, same Kolaskar–Tongaonkar method):
+  `conda install -c bioconda emboss` (on Windows: WSL2 + conda, or Docker).
+* **BepiPred-3.0** local model (PyTorch + ESM-2): `pip install bp3`.
+* **Browser automation** for NetCTL 1.2 / BepiPred-2.0: `pip install playwright && playwright install chromium`.
+
+**Run the GUI** (guided 6-step flow: proteins → predictions → POA1 → conservancy → POA2 → results):
+```
+streamlit run poa/gui/app.py      # or:  python run_gui.py
+```
+
+**Run the CLI** (unchanged):
+```
+python POA1_v1.0.py -f proteins.fasta -d results -b3 bepipred3.fasta -e y
+python POA2_v1.0.py -g True -t 70 -d conservancy_csvs -f proteins.fasta -rf 1
+```
+
+**Automation status per tool** (verified 2026 — details in `ARCHITECTURE.md`):
+
+| Tool | Strategy | Fallback |
+|---|---|---|
+| MHC-II Binding (IEDB) | REST API (synchronous) | manual upload |
+| BepiPred-3.0 | local `bp3` package | manual upload |
+| PAP/IMED | local EMBOSS `antigenic` | manual upload |
+| Epitope Conservancy (IEDB) | **local reimplementation** (no API/standalone exists) | manual CSV upload |
+| NetCTL 1.2 / BepiPred-2.0 | best-effort browser automation | manual upload |
+| pyTMHMM | local (unchanged) | — |
+
+In every case, if a service is unavailable the pipeline logs a clear message and lets you upload
+the result file manually (preserving the original semi-automatic behavior).
+
+**Tests:** `pytest` (parsers, ranking/filtering, local conservancy, service clients, GUI backend).
+
+> **Known issue (pending decision):** the NetCTL 1.2 HTML parser has a pre-existing bug (row
+> append via a non-sequential index, incompatible with pandas ≥ 2; and marker/append logic
+> inconsistent with the `<-E` epitope selection). It is preserved verbatim and covered by an
+> `xfail` test, awaiting approval to fix — it changes which rows are selected (scientific logic).
+
 ## 1. INTRODUCTION
 
 High-throughput screening, genomic sequence analysis of pathogenic organisms, and reverse vaccinology techniques have revolutionized the rapid development of vaccines and diagnostic tests. In this context, in silico approaches, such as multi-epitope construction, have become indispensable for designing biotechnological products and immunotherapeutic interventions against viral, bacterial, and parasitic diseases ([Dar et al., 2021](https://www.nature.com/articles/s41598-021-90868-2); [Enayatkhani et al., 2021](https://www.tandfonline.com/doi/full/10.1080/07391102.2020.1756411?casa_token=Ctu83G9J4aEAAAAA%3Aocl_27U5qwcFn-WXSFZIaaSmChfq-hC5ggb281Z1hGuocFuOXH65acPngTeO6HavrexguLxkdEbfAVQ); [Shey et al., 2019](https://www.nature.com/articles/s41598-019-40833-x)).
