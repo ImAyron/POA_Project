@@ -1,8 +1,6 @@
 """Tests for every POA1 parser: each must produce the standardized epitope columns."""
 import json
 
-import pytest
-
 from poa.core.models import STANDARD_COLUMNS
 from poa.core.parsers import bepipred, conservancy, mhcii, netctl, others, papimed
 
@@ -77,14 +75,6 @@ def test_papimed_txt(tmp_path):
 
 
 # --------------------------------------------------------------------------- NetCTL (HTML)
-@pytest.mark.xfail(
-    reason="Known bug in the original netctl parser (preserved verbatim): rows are appended "
-    "with the file line number as a non-sequential .loc index (rejected by pandas>=2), and the "
-    "marker/append logic ('if last != E: append -') is inconsistent with selecting '<-E', "
-    "overflowing the 16 columns. Awaiting user approval to fix the selection logic.",
-    strict=True,
-    raises=ValueError,
-)
 def test_netctl_html(tmp_path):
     lines = [
         "NetCTL 1.2 predictions",
@@ -104,6 +94,27 @@ def test_netctl_html(tmp_path):
     assert row["Peptide Sequence"] == "AADEFGHIK"
     assert int(row["Initial Position"]) == 1
     assert int(row["Final Position"]) == 9  # 1 + len(9) - 1
+
+
+def test_netctl_no_data_returns_empty(tmp_path):
+    # A file with no data lines (nothing starting with a digit) must yield an empty frame.
+    f = tmp_path / "netctl.html"
+    f.write_text("NetCTL 1.2 predictions\nheader row without digits\n")
+    df = netctl.netctlAntigenEpitopes(str(f))
+    assert list(df.columns) == STANDARD_COLUMNS
+    assert len(df) == 0
+
+
+def test_netctl_non_epitope_lines_excluded(tmp_path):
+    # 16-token line ending in '<-E' is an epitope; 15-token line (no marker) is padded and excluded.
+    lines = [
+        "1 id SPIKE_SARS pep AADEFGHIK aff 0.1 0.2 cle 0.3 tap 0.4 t2 COMB 0.9 <-E",
+        "2 id SPIKE_SARS pep BBCDEFGHI aff 0.1 0.2 cle 0.3 tap 0.4 COMB 0.1",
+    ]
+    f = tmp_path / "netctl.html"
+    f.write_text("\n".join(lines) + "\n")
+    df = netctl.netctlAntigenEpitopes(str(f))
+    assert set(df["Peptide Sequence"]) == {"AADEFGHIK"}
 
 
 # --------------------------------------------------------------------------- MHC-II (dir of TSV)

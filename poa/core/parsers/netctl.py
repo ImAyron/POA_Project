@@ -27,20 +27,31 @@ def netctlAntigenEpitopes(file):
     with open(file, "r") as raw_data:
         netctl_results = [html.unescape(line.strip()) for line in raw_data if not line.isspace()]
 
-    # Fill DataFrame with parsed NetCTL results
-    for i, line in enumerate(netctl_results):
+    # Fill DataFrame with parsed NetCTL results.
+    # FIX (user-approved): use a sequential row index — the file line number is non-sequential and
+    # pandas>=2 rejects `.loc[i] = list` for it — and pad only SHORT rows up to the column count.
+    # Epitope lines carry the trailing '<-E' marker (16 tokens); non-epitope lines lack it
+    # (15 tokens) and get a '-' placeholder in the Identified_MHC_ligands column.
+    row_index = 0
+    for line in netctl_results:
         if line and line[0].isdigit():
             line = " ".join(line.split())  # Remove extra spaces
             new_df_line = line.split(" ")
 
-            # If last element is not 'E', add a placeholder
-            if new_df_line[-1] != "E":
+            while len(new_df_line) < len(columns):
                 new_df_line.append("-")
+            if len(new_df_line) != len(columns):
+                continue  # skip unexpectedly long / malformed lines
 
-            netctl_results_df.loc[i] = new_df_line
+            netctl_results_df.loc[row_index] = new_df_line
+            row_index += 1
 
     # Select predicted epitopes identified by NetCTL
     netctl_epitopes = netctl_results_df[netctl_results_df["Identified_MHC_ligands"] == "<-E"].reset_index(drop=True)
+
+    result_columns = ["Method", "Specie", "Protein", "ID_Sequence", "Initial Position", "Final Position", "Peptide Sequence"]
+    if netctl_epitopes.empty:
+        return pd.DataFrame(columns=result_columns)
 
     # Select and rename relevant columns
     netctl_epitopes_slice = netctl_epitopes[["Protein_identifier", "Residue_number", "Peptide_sequence"]].copy()

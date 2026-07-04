@@ -52,10 +52,11 @@ the result file manually (preserving the original semi-automatic behavior).
 
 **Tests:** `pytest` (parsers, ranking/filtering, local conservancy, service clients, GUI backend).
 
-> **Known issue (pending decision):** the NetCTL 1.2 HTML parser has a pre-existing bug (row
-> append via a non-sequential index, incompatible with pandas ≥ 2; and marker/append logic
-> inconsistent with the `<-E` epitope selection). It is preserved verbatim and covered by an
-> `xfail` test, awaiting approval to fix — it changes which rows are selected (scientific logic).
+> **Fixed:** the NetCTL 1.2 HTML parser had a pre-existing bug (row append via a non-sequential
+> index, incompatible with pandas ≥ 2; and marker/append logic inconsistent with the `<-E`
+> epitope selection). It was corrected (user-approved) to use a sequential index and to pad only
+> short rows to the column count, keeping the `<-E` selection documented in the README; covered
+> by unit tests.
 
 ## 1. INTRODUCTION
 
