@@ -49,17 +49,19 @@ mas é mais lento e o `.venv` do Windows fica visível; apenas não o use.)*
 
 ```bash
 # ambiente (Python 3.11 = ampla compatibilidade com pyTMHMM/biopython)
-conda create -n poa python=3.11 pip -y
+# usamos --override-channels -c conda-forge para NÃO tocar nos canais 'default' da Anaconda
+# (que hoje exigem aceitar Termos de Serviço). Assim evitamos o CondaToSNonInteractiveError.
+conda create -n poa --override-channels -c conda-forge python=3.11 pip -y
 conda activate poa
 
 # dependências Python do pipeline + GUI
 pip install pandas numpy biopython openpyxl pytest requests streamlit plotly
 
 # EMBOSS (substituto do PAP/IMED) — só existe no Linux, via bioconda
-conda install -c bioconda -c conda-forge emboss -y
+conda install -n poa --override-channels -c conda-forge -c bioconda emboss -y
 
 # pyTMHMM (topologia de membrana no POA2) — precisa de compilador C
-conda install -c conda-forge cython c-compiler -y
+conda install -n poa --override-channels -c conda-forge cython c-compiler -y
 pip install pyTMHMM
 ```
 
@@ -230,8 +232,13 @@ Para parar: `Ctrl+C` no terminal.
 
 ## 7. Solução de problemas
 
+- **`CondaToSNonInteractiveError` (Terms of Service dos canais da Anaconda)** → use
+  `--override-channels -c conda-forge` (como nos comandos acima) para não usar os canais
+  `pkgs/main`/`pkgs/r`. Alternativa: aceitar uma vez com
+  `conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main` (e idem
+  para `.../pkgs/r`).
 - **`antigenic: command not found`** → EMBOSS não instalou ou o env não está ativo. Rode
-  `conda activate poa` e reinstale: `conda install -c bioconda -c conda-forge emboss -y`.
+  `conda activate poa` e reinstale: `conda install -n poa --override-channels -c conda-forge -c bioconda emboss -y`.
 - **`pip install pyTMHMM` falha (numpy/Cython)** → garanta o compilador
   (`conda install -c conda-forge cython c-compiler -y`) e, se persistir por ABI do numpy,
   fixe o numpy: `pip install "numpy<2"` e reinstale (`pip install --no-cache-dir pyTMHMM`).
