@@ -60,10 +60,19 @@ pip install pandas numpy biopython openpyxl pytest requests streamlit plotly
 # EMBOSS (substituto do PAP/IMED) — só existe no Linux, via bioconda
 conda install -n poa --override-channels -c conda-forge -c bioconda emboss -y
 
-# pyTMHMM (topologia de membrana no POA2) — precisa de compilador C
+# pyTMHMM (topologia de membrana no POA2) — precisa de compilador C E numpy<2.
+# O pyTMHMM 1.3.6 não compila contra numpy 2.x (usa np.int_t) e seu setup.py importa numpy
+# em tempo de build (por isso --no-build-isolation, para usar o numpy já instalado no env).
 conda install -n poa --override-channels -c conda-forge cython c-compiler -y
-pip install pyTMHMM
+pip install "numpy<2"
+pip install --no-build-isolation pyTMHMM
+python -c "import pyTMHMM; print('pyTMHMM OK')"
 ```
+
+> ⚠️ Mantenha `numpy<2` neste env. Se um `pip install` futuro subir o numpy para 2.x, o pyTMHMM
+> (compilado contra numpy 1.x) quebra com `numpy.core.multiarray failed to import` — basta rodar
+> `pip install "numpy<2"` de novo (não precisa recompilar o pyTMHMM). E **não** use
+> `--force-reinstall pyTMHMM`, pois isso faz o pip re-subir o numpy para 2.x.
 
 Verifique:
 ```bash
@@ -239,9 +248,17 @@ Para parar: `Ctrl+C` no terminal.
   para `.../pkgs/r`).
 - **`antigenic: command not found`** → EMBOSS não instalou ou o env não está ativo. Rode
   `conda activate poa` e reinstale: `conda install -n poa --override-channels -c conda-forge -c bioconda emboss -y`.
-- **`pip install pyTMHMM` falha (numpy/Cython)** → garanta o compilador
-  (`conda install -c conda-forge cython c-compiler -y`) e, se persistir por ABI do numpy,
-  fixe o numpy: `pip install "numpy<2"` e reinstale (`pip install --no-cache-dir pyTMHMM`).
+- **`pip install pyTMHMM` falha** — três sintomas comuns e a receita que funciona:
+  1. `No module named 'numpy'` no build → o setup.py importa numpy; use `--no-build-isolation`.
+  2. `hmm.pyx: np.int_t ... Invalid type` → numpy 2.x removeu `np.int_t`; use `numpy<2`.
+  3. `numpy.core.multiarray failed to import` ao importar → foi compilado com numpy 1.x mas o
+     runtime está com numpy 2.x → volte o numpy para 1.x.
+  Sequência que resolve tudo (com `cython`+`c-compiler` já instalados no env):
+  ```bash
+  pip install "numpy<2"
+  pip install --no-build-isolation pyTMHMM   # NÃO use --force-reinstall (re-sobe o numpy)
+  python -c "import pyTMHMM; print('pyTMHMM OK')"
+  ```
   O pandas funciona com `numpy>=1.26,<2`.
 - **`ModuleNotFoundError: poa`** → rode a partir da raiz do repo (`cd ~/POA_Project`);
   o `pytest.ini` já define `pythonpath = .`.
