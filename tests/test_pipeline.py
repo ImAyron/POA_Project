@@ -67,6 +67,20 @@ def test_run_poa1_requires_a_method(tmp_path):
         assert "required" in str(exc).lower()
 
 
+def test_run_poa1_creates_missing_output_dir(tmp_path):
+    # -d points to a directory that does not exist yet; the pipeline must create it (even with -e y).
+    b3 = tmp_path / "bp3.fasta"
+    b3.write_text(">SARS_SPIKE_NP1\nmktAYIamk\n")
+    f = tmp_path / "proteins.fasta"
+    f.write_text(">SPIKE_SARS_NP1\nMKTAYIAMKQRST\n")
+    out = tmp_path / "not_created_yet" / "out"  # nested, does not exist
+    args = _poa1_args(tmp_path, b3=b3, x="", f=f, out=out, export="y")
+    result = pipeline.run_poa1(args)
+    assert out.exists()
+    assert os.path.exists(result.report_path)
+    assert os.path.exists(os.path.join(str(out), "Bepipred_Epitopes.xlsx"))
+
+
 def test_run_poa1_xlsx_export(tmp_path):
     b3 = tmp_path / "bp3.fasta"
     b3.write_text(">SARS_SPIKE_NP1\nmktAYIamk\n")

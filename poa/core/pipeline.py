@@ -9,6 +9,7 @@ All functions accept an ``args``-like object (anything with the expected attribu
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -158,6 +159,10 @@ def run_poa1(args) -> Poa1Result:
     if (args.b2 == "") and (args.b3 == "") and (args.p == "") and (args.n == "") and (args.m == "") and (args.x == ""):
         raise Exception("ERROR: Some the following arguments are required: -n, -m, -b (-b2 or -b3), -p")
 
+    # Ensure the output directory exists (robustness: the pipeline no longer requires the user to
+    # pre-create -d; this also covers the optional per-method .xlsx export inside consolidation).
+    os.makedirs(args.d, exist_ok=True)
+
     # Checking for the presence of 'x' in the sequences
     check, seq_X = report.checkIntegrity(args.f)
     if check == True:
@@ -223,8 +228,9 @@ def run_poa2(args) -> Poa2Result:
     # Perform TMHMM prediction on epitopes
     POA2_df = topology.tmhmmAnalysis(args, ConservancyAnalysis_DF)
 
-    # Save results to an Excel file
+    # Save results to an Excel file (create the output directory if needed)
     xlsx_path = f"{path}_{args.t}.xlsx"
+    os.makedirs(os.path.dirname(xlsx_path) or ".", exist_ok=True)
     POA2_df.to_excel(xlsx_path, sheet_name=f"{type_symbol}{args.t}", startcol=0, index=False)
 
     # Generate FASTA file if requested
