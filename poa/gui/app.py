@@ -4,8 +4,15 @@ Run with:  streamlit run poa/gui/app.py   (or:  python run_gui.py)
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
+
+# When launched via `streamlit run poa/gui/app.py`, Streamlit puts this file's directory on
+# sys.path (not the project root), so `import poa` would fail. Add the repo root explicitly.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import pandas as pd
 import plotly.express as px
