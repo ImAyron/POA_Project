@@ -8,6 +8,8 @@ This is the English version of the README. For the Portuguese (PT-BR) version, p
 > This release adds an optional automation layer and a graphical interface **without changing the
 > scientific ranking/selection logic**. The original command line still works exactly as before.
 > The full design and per-tool automation strategy are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> A complete report of everything that changed (PT-BR) is in [`MUDANCAS.md`](MUDANCAS.md) —
+> also available as [`MUDANCAS.pdf`](MUDANCAS.pdf).
 
 **Package layout** (refactored into layers; the flat scripts became thin shims):
 `poa/core` (parsing + pipeline logic, no network) · `poa/services` (external tools) ·

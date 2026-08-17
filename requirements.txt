@@ -36,3 +36,8 @@ playwright>=1.40
 
 # --- development / tests ---
 pytest>=7.0          # unit tests for the parsers and ranking/filtering logic
+
+# --- documentation build (optional) ---
+# Only needed to regenerate MUDANCAS.pdf via `python tools/md2pdf.py MUDANCAS.md MUDANCAS.pdf`
+# (printing is done by a headless Edge/Chrome already installed on the machine).
+markdown>=3.5
