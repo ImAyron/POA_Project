@@ -1,4 +1,7 @@
 """Tests for the GUI backend (UI-agnostic orchestration)."""
+import json
+from pathlib import Path
+
 import pandas as pd
 
 from poa.gui import backend
@@ -34,6 +37,25 @@ def test_build_poa2_args_objective_mapping(tmp_path):
                                      str(tmp_path), "prot.fasta", str(tmp_path))
     assert unique.g is None and unique.l == "True"
     assert unique.rf is None  # empty -> None
+
+
+def test_import_bepipred2_adapts_upload(tmp_path):
+    ctx = backend.WorkContext(tmp_path)
+    raw = json.dumps({
+        "info": {"failedjobs": 0, "size": 1},
+        "antigens": {"Sequence": {"AA": list("MRCVGIGN"), "PRED": [0.1, 0.9, 0.9, 0.9, 0.1, 0.1, 0.9, 0.9]}},
+    }).encode("utf-8")
+
+    prep = backend.import_bepipred2(ctx, "bepipred_denv1.json", raw, "DENV1", protein="E")
+
+    assert prep.header == "E_DENV1_ref"
+    assert prep.sequence == "MRCVGIGN"
+    assert prep.has_x is False
+    # both the rewritten JSON and the rebuilt reference land under the session inputs dir
+    assert prep.b2_json.startswith(str(ctx.inputs_dir))
+    assert prep.reference_fasta.startswith(str(ctx.inputs_dir))
+    ref = Path(prep.reference_fasta).read_text().splitlines()
+    assert ref[0] == ">E_DENV1_ref" and ref[1] == "MRCVGIGN"
 
 
 def test_predictions_summary():

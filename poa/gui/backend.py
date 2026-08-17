@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from ..core import pipeline
+from ..services import realdata_import
 from ..services.cache import Cache
 
 
@@ -161,3 +162,18 @@ def save_upload(dest_dir: Path, filename: str, data: bytes) -> str:
     path = dest_dir / filename
     path.write_bytes(data)
     return str(path)
+
+
+# --------------------------------------------------------------------------- real-data adapter
+def import_bepipred2(ctx: WorkContext, filename: str, data: bytes,
+                     specie: str, protein: str = "E") -> realdata_import.Prepared:
+    """
+    Adapt an original-workflow BepiPred-2.0 JSON upload to pipeline conventions.
+
+    Persists the upload, then rewrites its antigen key to ``Protein_Specie_ID`` and rebuilds the
+    reference protein FASTA from the JSON's own ``AA`` array (see :mod:`poa.services.realdata_import`).
+    Returns the :class:`~poa.services.realdata_import.Prepared` record (paths + ``has_x`` flag);
+    the caller wires ``b2_json`` into the POA1 files and may adopt ``reference_fasta`` as ``-f``.
+    """
+    raw_path = save_upload(ctx.inputs_dir, filename, data)
+    return realdata_import.prepare_bepipred2(raw_path, specie, str(ctx.inputs_dir), protein=protein)
