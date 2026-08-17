@@ -27,6 +27,7 @@ requests>=2.28       # HTTP client for the IEDB MHC-II REST API
 # --- graphical interface (new) ---
 streamlit>=1.30      # local web GUI orchestrating the full pipeline
 plotly>=5.18         # interactive charts of the selected epitopes in the GUI
+py3Dmol>=2.0         # 3D molecular viewer in the GUI (epitopes highlighted on a PDB; 3Dmol.js)
 
 # --- browser automation for tools without an API (new, optional) ---
 # Needed only for automating NetCTL 1.2 / BepiPred 2.0 web forms. After installing, run:

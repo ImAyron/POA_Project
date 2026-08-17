@@ -17,9 +17,10 @@ if str(_REPO_ROOT) not in sys.path:
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 from Bio import SeqIO
 
-from poa.gui import backend
+from poa.gui import backend, viz
 from poa.logging_conf import setup_logging
 from poa.services import (
     antigenic_client,
@@ -70,6 +71,7 @@ STEPS = [
     "4 · Conservancy Analysis",
     "5 · POA2 (conservação + topologia)",
     "6 · Resultados",
+    "7 · Visualização (2D/3D)",
 ]
 
 
@@ -185,6 +187,39 @@ def _automate_mhcii(alleles: str, length: int):
         status.update(label=f"MHC-II: {ok} ok, {fail} falha(s).", state=state)
 
 
+def _import_bepipred2_original():
+    """Adapter for original manual-workflow BepiPred-2.0 JSONs (generic 'Sequence' antigen key)."""
+    st.markdown("---")
+    st.markdown("**Dados originais do fluxo manual (BepiPred-2.0)**")
+    st.caption("Para JSONs do BepiPred-2.0 com chave de antígeno genérica (`Sequence`): reescrevemos "
+               "o cabeçalho para `Proteína_Espécie_ID` e reconstruímos a proteína de referência (-f) "
+               "a partir do próprio array `AA` do JSON.")
+    c1, c2 = st.columns(2)
+    with c1:
+        specie = st.text_input("Espécie (ex.: DENV1, CHIKV)", "", key="rd_specie")
+    with c2:
+        protein = st.text_input("Proteína (ex.: E, E1)", "E", key="rd_protein")
+    raw = st.file_uploader("BepiPred-2.0 original (.json)", type=["json"], key="up_b2_raw")
+    if raw is not None and st.button("Adaptar e usar", key="rd_import_btn"):
+        if not specie.strip():
+            st.warning("Informe a espécie antes de adaptar.")
+            return
+        prep = backend.import_bepipred2(ctx, raw.name, raw.getvalue(),
+                                        specie.strip(), (protein.strip() or "E"))
+        ss.poa1_files["b2"] = prep.b2_json
+        ss.poa1_files.pop("b3", None)
+        adopted_ref = False
+        if not ss.proteins_path:
+            ss.proteins_path = prep.reference_fasta
+            adopted_ref = True
+        st.success(f"JSON adaptado como `{prep.header}` (referência de {len(prep.sequence)} aa).")
+        if adopted_ref:
+            st.info("Proteína de referência reconstruída do JSON e definida como -f (etapa 1).")
+        if prep.has_x:
+            st.warning("A referência contém o resíduo ambíguo 'X' — o POA1 vai recusá-la "
+                       "(checagem de integridade do -f) até que ele seja resolvido.")
+
+
 def _manual_upload(label: str, key: str, types, filename: str):
     up = st.file_uploader(label, type=types, key=f"up_{key}")
     if up is not None:
@@ -211,6 +246,7 @@ def step_predictions():
             st.caption("BepiPred-3.0 via pacote local `bp3`. BepiPred-2.0: use upload do JSON.")
         _manual_upload("Upload BepiPred-2.0 (.json)", "b2", ["json"], "bepipred2.json")
         _manual_upload("Upload BepiPred-3.0 (.fasta)", "b3", ["fasta", "fa", "txt"], "bepipred3.fasta")
+        _import_bepipred2_original()
 
     # B cell — PAP/IMED via EMBOSS
     with st.expander("🅱️ Células B — PAP/IMED (antigenicidade)", expanded=False):
@@ -405,6 +441,57 @@ def step_results():
             _download(fasta, f"⬇️ {fasta.name}", "text/plain")
 
 
+# =========================================================================== STEP 7
+def step_viz():
+    st.header("7 · Visualização dos epítopos (2D / 3D)")
+    if ss.poa1_result is None:
+        st.warning("Execute o POA1 (etapa 3) para ter epítopos a visualizar.")
+        return
+    df = ss.poa1_result.predictions
+
+    # --- 2D epitope map (no structure required) ---
+    st.subheader("Mapa 2D de epítopos")
+    st.caption("Cada segmento é um epítopo ao longo da sequência; uma trilha por proteína/espécie, "
+               "colorido por método.")
+    st.plotly_chart(viz.epitope_map_figure(df), use_container_width=True)
+
+    # --- 3D structure viewer (upload a PDB) ---
+    st.subheader("Estrutura 3D (envie um PDB)")
+    st.caption("Estilo Discovery Studio: epítopos destacados sobre a estrutura. O visualizador usa "
+               "3Dmol.js (precisa de internet para renderizar).")
+
+    tracks = sorted({f"{r.Protein}|{r.Specie}" for r in df.itertuples()})
+    choice = st.selectbox("Epítopos de qual proteína/espécie destacar?", tracks)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        base_style = st.selectbox("Representação", ["cartoon", "stick", "sphere"], index=0)
+    with c2:
+        surface = st.checkbox("Mostrar superfície", value=False)
+    with c3:
+        chain = st.text_input("Cadeia (opcional)", "")
+
+    pdb_up = st.file_uploader("Arquivo .pdb", type=["pdb", "ent"], key="pdb_up")
+    if pdb_up is not None:
+        prot, spec = choice.split("|")
+        ranges = viz.epitope_ranges(df, protein=prot, specie=spec)
+        try:
+            html = viz.build_3dmol_view_html(
+                pdb_up.getvalue().decode("utf-8", "replace"),
+                ranges,
+                chain=chain or None,
+                base_style=base_style,
+                show_surface=surface,
+            )
+            components.html(html, height=520)
+            st.caption(f"{len(ranges)} epítopo(s) de {prot}_{spec} destacado(s) em vermelho. "
+                       "Atenção: a numeração de resíduo do PDB precisa corresponder à posição na "
+                       "sequência usada nas predições (cuidado com gaps/offset).")
+        except Exception as exc:  # noqa: BLE001 - surface the error to the user, don't crash the app
+            st.error(f"Não foi possível renderizar a estrutura: {exc}")
+    else:
+        st.info("Envie um arquivo .pdb para ver os epítopos destacados na estrutura 3D.")
+
+
 # --------------------------------------------------------------------------- dispatch
 _DISPATCH = {
     STEPS[0]: step_inputs,
@@ -413,5 +500,6 @@ _DISPATCH = {
     STEPS[3]: step_conservancy,
     STEPS[4]: step_poa2,
     STEPS[5]: step_results,
+    STEPS[6]: step_viz,
 }
 _DISPATCH[step]()
