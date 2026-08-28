@@ -5,7 +5,6 @@ Run with:  streamlit run poa/gui/app.py   (or:  python run_gui.py)
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 # When launched via `streamlit run poa/gui/app.py`, Streamlit puts this file's directory on
@@ -39,19 +38,54 @@ st.set_page_config(page_title="POA — Pipeline de Otimização de Antígenos", 
 def _init_state():
     ss = st.session_state
     if "ctx" not in ss:
-        ss.ctx = backend.WorkContext(Path(tempfile.mkdtemp(prefix="poa_gui_")))
-    ss.setdefault("proteins_path", None)
+        ss.ctx = backend.WorkContext(backend.default_results_root())
+    ss.setdefault("proteins_path", None)   # merged -f reference (all species)
+    ss.setdefault("ref_raw", [])           # protein FASTAs as uploaded in step 1
+    ss.setdefault("ref_swap", False)       # source headers are Specie_Protein -> swap them
+    ss.setdefault("ref_uploads", [])       # the same files after optional header normalisation
     ss.setdefault("params_poa1", {})
-    ss.setdefault("poa1_files", {})       # keys b2/b3/p/n/m/x -> path
+    # one *list* of files per method (b2/b3/p/n/x) so several species can be analysed together;
+    # 'm' (MHC-II) stays a single directory of Protein_Specie.html files
+    ss.setdefault("poa1_sources", {})
+    ss.setdefault("prepared_b2", [])       # Prepared records from the BepiPred-2.0 adapter
     ss.setdefault("poa1_result", None)
     ss.setdefault("threshold", 70)
     ss.setdefault("conservancy_ready", False)
+    ss.setdefault("comparison_sets", {})   # SPECIE -> comparison FASTA path
     ss.setdefault("poa2_result", None)
     return ss
 
 
 ss = _init_state()
 ctx: backend.WorkContext = ss.ctx
+
+
+def _collect_sources():
+    """All per-species prediction files, keyed by POA1 method argument."""
+    src = {k: list(v) for k, v in ss.poa1_sources.items() if v}
+    if ss.prepared_b2:
+        src.setdefault("b2", []).extend(pr.b2_json for pr in ss.prepared_b2)
+    return src
+
+
+def _refresh_reference(allow_clear: bool = False):
+    """
+    Merge every reference FASTA (uploaded + rebuilt by the adapter) into a single ``-f``.
+
+    With nothing to merge the current ``-f`` is kept unless ``allow_clear`` — step 1 re-renders on
+    every interaction, and a reference adopted elsewhere (e.g. resumed from ``results/`` in step 5)
+    must not be wiped just because no file is sitting in the uploader.
+    """
+    parts = list(ss.ref_uploads) + [pr.reference_fasta for pr in ss.prepared_b2]
+    if not parts:
+        if allow_clear:
+            ss.proteins_path = None
+        return ss.proteins_path
+    if len(parts) == 1:
+        ss.proteins_path = parts[0]
+    else:
+        ss.proteins_path = backend.merge_fastas(parts, str(ctx.inputs_dir / "proteins_all.fasta"))
+    return ss.proteins_path
 
 
 def _read_proteins():
@@ -82,13 +116,17 @@ def _status_icon(done: bool) -> str:
 with st.sidebar:
     st.markdown("### Progresso")
     st.write(f"{_status_icon(bool(ss.proteins_path))} Proteínas carregadas")
-    st.write(f"{_status_icon(bool(ss.poa1_files))} Resultados de predição")
+    st.write(f"{_status_icon(bool(_collect_sources()))} Resultados de predição")
     st.write(f"{_status_icon(ss.poa1_result is not None)} POA1 executado")
     st.write(f"{_status_icon(ss.conservancy_ready)} Conservancy pronta")
     st.write(f"{_status_icon(ss.poa2_result is not None)} POA2 executado")
     st.divider()
     step = st.radio("Etapa", STEPS)
-    st.caption(f"Diretório de trabalho:\n`{ctx.root}`")
+    st.divider()
+    st.markdown("### Resultados")
+    st.caption("Tudo é gravado nesta pasta do projeto (uma nova execução sobrescreve os arquivos "
+               "de mesmo nome — copie o que quiser guardar):")
+    st.code(str(ctx.root), language=None)
 
 
 st.title("Pipeline de Otimização de Antígenos (POA)")
@@ -97,18 +135,46 @@ st.title("Pipeline de Otimização de Antígenos (POA)")
 # =========================================================================== STEP 1
 def step_inputs():
     st.header("1 · Proteínas e parâmetros do POA1")
-    st.write("Envie o arquivo FASTA com as proteínas/poliproteínas usadas nas predições "
-             "(cabeçalho no formato `Proteína_Espécie_ID`).")
-    up = st.file_uploader("FASTA de proteínas (-f)", type=["fasta", "fa", "faa", "txt"])
-    if up is not None:
-        path = backend.save_upload(ctx.inputs_dir, "proteins.fasta", up.getvalue())
-        ss.proteins_path = path
-        st.success(f"Proteínas carregadas: {up.name}")
+    st.write("Envie o(s) arquivo(s) FASTA com as proteínas/poliproteínas usadas nas predições "
+             "(cabeçalho no formato `Proteína_Espécie_ID`, ex.: `E_DENV1_ref`). "
+             "**Para analisar mais de uma espécie**, inclua todas as proteínas — no mesmo FASTA "
+             "ou em vários arquivos; eles são unidos em um único `-f`.")
+    ups = st.file_uploader("FASTA de proteínas (-f)", type=["fasta", "fa", "faa", "txt"],
+                           accept_multiple_files=True)
+    if ups:
+        ss.ref_raw = [backend.save_upload(ctx.inputs_dir, f"ref_{i}_{u.name}", u.getvalue())
+                      for i, u in enumerate(ups)]
+
+    swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `denv1_ns1`) — inverter "
+                       "os dois primeiros campos", value=ss.ref_swap, key="ref_swap_cb")
+    ss.ref_swap = swap
+
+    if ss.ref_raw:
+        if swap:
+            ss.ref_uploads = [backend.normalize_fasta_headers(
+                ss.ref_raw, str(ctx.inputs_dir / "proteins_normalized.fasta"), swap=True)]
+        else:
+            ss.ref_uploads = list(ss.ref_raw)
+        st.success(f"{len(ss.ref_raw)} arquivo(s) de proteínas carregado(s).")
+    _refresh_reference()
 
     if ss.proteins_path:
-        seqs = _read_proteins()
-        st.info(f"{len(seqs)} sequência(s) detectada(s): " + ", ".join(s[0] for s in seqs[:10]) +
-                (" …" if len(seqs) > 10 else ""))
+        rows = backend.parse_fasta_headers(ss.proteins_path)
+        species = backend.species_in_fasta(ss.proteins_path)
+        st.write(f"**{len(rows)} sequência(s)** — veja como cada cabeçalho foi interpretado:")
+        st.dataframe(pd.DataFrame([{"Cabeçalho": r["header"], "Proteína": r["protein"],
+                                    "Espécie": r["specie"], "ID": r["id"]} for r in rows]),
+                     use_container_width=True, hide_index=True)
+        if not all(r["ok"] for r in rows):
+            st.error("Há cabeçalhos sem separador `_`, dos quais nenhuma espécie pode ser extraída. "
+                     "Use `Proteína_Espécie_ID` (ex.: `NS1_DENV1_ref`).")
+        elif species:
+            st.success(f"{len(species)} espécie(s) identificada(s): " + ", ".join(species))
+            st.caption("Se a coluna Espécie mostrar o nome da proteína, marque a caixa de inversão acima.")
+        else:
+            st.error("Nenhuma espécie identificada nos cabeçalhos. Use o formato "
+                     "`Proteína_Espécie_ID` (ex.: `NS1_DENV1_ref`) — sem ele o POA não consegue "
+                     "separar as espécies nas etapas 3 e 4.")
 
     st.subheader("Parâmetros de filtragem (opcionais)")
     c1, c2, c3 = st.columns(3)
@@ -132,7 +198,10 @@ def step_inputs():
 
     ss.params_poa1 = dict(bmin=bmin, bmax=bmax, pmin=pmin, pmax=pmax, xmin=xmin, xmax=xmax,
                           mhla=mhla, mic=mic, e="y" if export else "n")
-    st.success("Parâmetros salvos.") if ss.proteins_path else st.warning("Envie o FASTA de proteínas para continuar.")
+    if ss.proteins_path:
+        st.success("Parâmetros salvos.")
+    else:
+        st.warning("Envie o FASTA de proteínas para continuar.")
 
 
 # =========================================================================== STEP 2
@@ -141,8 +210,9 @@ def _automate_bepipred3():
         try:
             res = bepipred_client.predict(ss.proteins_path, cache=ctx.cache())
             path = backend.save_upload(ctx.inputs_dir, "bepipred3.fasta", res.content.encode("utf-8"))
-            ss.poa1_files["b3"] = path
-            ss.poa1_files.pop("b2", None)
+            ss.poa1_sources["b3"] = [path]
+            ss.poa1_sources.pop("b2", None)
+            ss.prepared_b2 = []
             status.update(label=f"BepiPred-3.0 concluído ({res.source}).", state="complete")
         except (ServiceUnavailable, ServiceError) as exc:
             status.update(label="BepiPred-3.0 indisponível.", state="error")
@@ -155,7 +225,7 @@ def _automate_antigenic():
             res = antigenic_client.predict(ss.proteins_path, cache=ctx.cache())
             pap_txt = antigenic_client.to_pap_txt(res.content, ss.proteins_path)
             path = backend.save_upload(ctx.inputs_dir, "pap_antigenic.txt", pap_txt.encode("utf-8"))
-            ss.poa1_files["p"] = path
+            ss.poa1_sources["p"] = [path]
             status.update(label=f"EMBOSS antigenic concluído ({res.source}).", state="complete")
         except (ServiceUnavailable, ServiceError) as exc:
             status.update(label="EMBOSS antigenic indisponível.", state="error")
@@ -182,50 +252,111 @@ def _automate_mhcii(alleles: str, length: int):
                 st.write(f"• {protein}_{specie}: falhou — {exc}")
                 fail += 1
         if ok:
-            ss.poa1_files["m"] = str(ctx.mhcii_dir)
+            ss.poa1_sources["m"] = [str(ctx.mhcii_dir)]
         state = "complete" if fail == 0 else ("error" if ok == 0 else "running")
         status.update(label=f"MHC-II: {ok} ok, {fail} falha(s).", state=state)
 
 
 def _import_bepipred2_original():
-    """Adapter for original manual-workflow BepiPred-2.0 JSONs (generic 'Sequence' antigen key)."""
-    st.markdown("---")
-    st.markdown("**Dados originais do fluxo manual (BepiPred-2.0)**")
-    st.caption("Para JSONs do BepiPred-2.0 com chave de antígeno genérica (`Sequence`): reescrevemos "
-               "o cabeçalho para `Proteína_Espécie_ID` e reconstruímos a proteína de referência (-f) "
-               "a partir do próprio array `AA` do JSON.")
-    c1, c2 = st.columns(2)
-    with c1:
-        specie = st.text_input("Espécie (ex.: DENV1, CHIKV)", "", key="rd_specie")
-    with c2:
-        protein = st.text_input("Proteína (ex.: E, E1)", "E", key="rd_protein")
-    raw = st.file_uploader("BepiPred-2.0 original (.json)", type=["json"], key="up_b2_raw")
-    if raw is not None and st.button("Adaptar e usar", key="rd_import_btn"):
-        if not specie.strip():
-            st.warning("Informe a espécie antes de adaptar.")
-            return
-        prep = backend.import_bepipred2(ctx, raw.name, raw.getvalue(),
-                                        specie.strip(), (protein.strip() or "E"))
-        ss.poa1_files["b2"] = prep.b2_json
-        ss.poa1_files.pop("b3", None)
-        adopted_ref = False
-        if not ss.proteins_path:
-            ss.proteins_path = prep.reference_fasta
-            adopted_ref = True
-        st.success(f"JSON adaptado como `{prep.header}` (referência de {len(prep.sequence)} aa).")
-        if adopted_ref:
-            st.info("Proteína de referência reconstruída do JSON e definida como -f (etapa 1).")
-        if prep.has_x:
-            st.warning("A referência contém o resíduo ambíguo 'X' — o POA1 vai recusá-la "
-                       "(checagem de integridade do -f) até que ele seja resolvido.")
+    """Adapter for original manual-workflow BepiPred-2.0 JSONs (non-conforming antigen keys).
+
+    Handles both shapes of the real data: one JSON per species, and a single JSON whose antigens
+    are several organisms (a submission of ``denv1_ns1`` + ``denv2_ns1`` comes back keyed
+    ``denv1``/``denv2``, which the ``Protein_Specie_ID`` regex cannot resolve). Each antigen gets
+    its own species/protein, and successive imports are accumulated.
+    """
+    st.markdown("**BepiPred-2.0 (.json)**")
+    st.caption("O arquivo é verificado no envio. Se as chaves de antígeno já seguirem "
+               "`Proteína_Espécie_ID`, ele é usado direto; caso contrário (`Sequence`, `denv1`, …) "
+               "você mapeia cada antígeno abaixo — reescrevemos o cabeçalho de **cada um** e "
+               "reconstruímos as proteínas de referência (-f) a partir do próprio array `AA` do "
+               "JSON. Vários antígenos no mesmo arquivo podem ser espécies diferentes.")
+
+    raw = st.file_uploader("BepiPred-2.0 (.json)", type=["json"], key="up_b2_raw")
+    if raw is not None:
+        raw_path = backend.save_upload(ctx.inputs_dir, f"raw_{raw.name}", raw.getvalue())
+        try:
+            keys = backend.antigen_keys(raw_path)
+            bad = backend.nonconforming_antigen_keys(raw_path)
+        except Exception as exc:  # noqa: BLE001 - malformed upload must not crash the app
+            st.error(f"Não foi possível ler o JSON: {exc}")
+            keys, bad = [], []
+
+        if not keys:
+            st.error("Nenhum bloco `antigens` encontrado no JSON.")
+        elif not bad:
+            # keys already conform -> the parser resolves species on its own, no adapter needed
+            ss.poa1_sources["b2"] = [raw_path]
+            ss.poa1_sources.pop("b3", None)
+            st.success(f"{len(keys)} antígeno(s) com chave no padrão `Proteína_Espécie_ID`: " +
+                       ", ".join(f"`{k}`" for k in keys[:6]) + (" …" if len(keys) > 6 else "") +
+                       ". Arquivo usado diretamente.")
+            st.info("Lembre-se de que o FASTA de proteínas (-f) da etapa 1 precisa conter essas "
+                    "mesmas espécies.")
+        else:
+            ss.poa1_sources.pop("b2", None)   # the raw file is unusable as-is
+            st.error("As chaves de antígeno deste JSON não seguem `Proteína_Espécie_ID`: " +
+                     ", ".join(f"`{k}`" for k in bad[:6]) + (" …" if len(bad) > 6 else "") +
+                     ". Sem mapeá-las, o POA1 não consegue identificar a espécie e todos os "
+                     "epítopos ficam sem espécie. Preencha os campos abaixo.")
+            st.write(f"**{len(keys)} antígeno(s) no arquivo.** Informe a espécie e a proteína de "
+                     "cada um — o cabeçalho passa a ser `Proteína_Espécie_ID`.")
+            mapping = {}
+            for i, key in enumerate(keys):
+                tokens = str(key).upper().split("_")
+                vis = "visible" if i == 0 else "collapsed"
+                c1, c2, c3 = st.columns([2, 2, 2])
+                with c1:
+                    st.text_input("Chave no JSON", str(key), disabled=True,
+                                  key=f"rd_key_{i}", label_visibility=vis)
+                with c2:
+                    sp = st.text_input("Espécie", tokens[0], key=f"rd_sp_{i}", label_visibility=vis)
+                with c3:
+                    prot = st.text_input("Proteína", tokens[1] if len(tokens) > 1 else "E",
+                                         key=f"rd_prot_{i}", label_visibility=vis)
+                mapping[key] = ((prot.strip().upper() or "E"), sp.strip().upper(), "ref")
+
+            if st.button("Adaptar e adicionar", key="rd_import_btn"):
+                if any(not v[1] for v in mapping.values()):
+                    st.warning("Informe a espécie de todos os antígenos antes de adaptar.")
+                    return
+                already = {sp for pr in ss.prepared_b2 for sp in pr.species}
+                dup = sorted({v[1] for v in mapping.values()} & already)
+                if dup:
+                    st.warning(f"Já importado(s): {', '.join(dup)}. Limpe as importações antes de repetir.")
+                    return
+                first = mapping[keys[0]]
+                prep = backend.import_bepipred2(ctx, raw.name, raw.getvalue(),
+                                                specie=first[1], protein=first[0], mapping=mapping)
+                ss.prepared_b2.append(prep)
+                ss.poa1_sources.pop("b3", None)
+                _refresh_reference()
+                st.success("Antígenos adaptados: " +
+                           ", ".join(f"`{e.header}` ({len(e.sequence)} aa)" for e in prep.entries))
+                st.info("Proteínas de referência reconstruídas do JSON e somadas ao -f (etapa 1).")
+                if prep.has_x:
+                    st.warning("A referência contém o resíduo ambíguo 'X' — o POA1 vai recusá-la "
+                               "(checagem de integridade do -f) até que ele seja resolvido.")
+
+    if ss.prepared_b2:
+        st.write("**Espécies importadas:** " +
+                 ", ".join(f"`{e.header}`" for pr in ss.prepared_b2 for e in pr.entries))
+        if st.button("Limpar espécies importadas", key="rd_clear_btn"):
+            ss.prepared_b2 = []
+            _refresh_reference(allow_clear=True)
+            st.rerun()
 
 
 def _manual_upload(label: str, key: str, types, filename: str):
-    up = st.file_uploader(label, type=types, key=f"up_{key}")
-    if up is not None:
-        path = backend.save_upload(ctx.inputs_dir, filename, up.getvalue())
-        ss.poa1_files[key] = path
-        st.success(f"{label}: {up.name} carregado.")
+    """Upload one file *per species* for a method; they are merged into the single POA1 input."""
+    ups = st.file_uploader(label, type=types, key=f"up_{key}", accept_multiple_files=True)
+    if ups:
+        stem = filename.rsplit(".", 1)[0]
+        ss.poa1_sources[key] = [
+            backend.save_upload(ctx.inputs_dir, f"{stem}_{i}_{up.name}", up.getvalue())
+            for i, up in enumerate(ups)
+        ]
+        st.success(f"{label}: {len(ups)} arquivo(s) — " + ", ".join(u.name for u in ups))
 
 
 def step_predictions():
@@ -234,7 +365,8 @@ def step_predictions():
         st.warning("Volte à etapa 1 e carregue o FASTA de proteínas.")
         return
     st.caption("Automatize quando houver via limpa; caso o serviço falhe, use o upload manual (plano B). "
-               "Pelo menos um método é obrigatório.")
+               "Pelo menos um método é obrigatório. **Multi-espécie:** envie um arquivo por espécie "
+               "em cada método — eles são unidos automaticamente antes do POA1.")
 
     # B cell — BepiPred
     with st.expander("🅱️ Células B — BepiPred", expanded=True):
@@ -244,8 +376,8 @@ def step_predictions():
                 _automate_bepipred3()
         with cols[1]:
             st.caption("BepiPred-3.0 via pacote local `bp3`. BepiPred-2.0: use upload do JSON.")
-        _manual_upload("Upload BepiPred-2.0 (.json)", "b2", ["json"], "bepipred2.json")
         _manual_upload("Upload BepiPred-3.0 (.fasta)", "b3", ["fasta", "fa", "txt"], "bepipred3.fasta")
+        st.markdown("---")
         _import_bepipred2_original()
 
     # B cell — PAP/IMED via EMBOSS
@@ -275,7 +407,7 @@ def step_predictions():
         if ups:
             for up in ups:
                 backend.save_upload(ctx.mhcii_dir, up.name, up.getvalue())
-            ss.poa1_files["m"] = str(ctx.mhcii_dir)
+            ss.poa1_sources["m"] = [str(ctx.mhcii_dir)]
             st.success(f"{len(ups)} arquivo(s) MHC-II carregado(s).")
 
     # Others
@@ -283,8 +415,10 @@ def step_predictions():
         _manual_upload("Upload outros (.fasta)", "x", ["fasta", "fa", "txt"], "others.fasta")
 
     st.divider()
-    if ss.poa1_files:
-        st.success("Métodos prontos: " + ", ".join(sorted(ss.poa1_files.keys())))
+    sources = _collect_sources()
+    if sources:
+        st.success("Métodos prontos: " +
+                   ", ".join(f"{k} ({len(v)} arquivo(s))" for k, v in sorted(sources.items())))
     else:
         st.warning("Nenhum resultado de predição ainda.")
 
@@ -292,14 +426,24 @@ def step_predictions():
 # =========================================================================== STEP 3
 def step_poa1():
     st.header("3 · POA1 — consolidação, ranqueamento e relatório")
-    if not ss.proteins_path or not ss.poa1_files:
+    sources = _collect_sources()
+    if not ss.proteins_path or not sources:
         st.warning("Complete as etapas 1 e 2 (proteínas + ao menos um método).")
         return
+
+    ref_species = backend.species_in_fasta(ss.proteins_path)
+    st.caption(f"Referência (-f): {len(ref_species)} espécie(s) — " +
+               (", ".join(ref_species) or "nenhuma identificada"))
     if st.button("▶️ Executar POA1", type="primary"):
         with st.status("Executando POA1…", expanded=True) as status:
             try:
-                result = backend.run_poa1(ctx, ss.poa1_files, ss.params_poa1, ss.proteins_path)
+                files = backend.consolidate_sources(sources, ctx.inputs_dir)
+                for key, path in sorted(files.items()):
+                    n = len(sources[key])
+                    st.write(f"• {key}: {Path(path).name}" + (f" ({n} arquivos unidos)" if n > 1 else ""))
+                result = backend.run_poa1(ctx, files, ss.params_poa1, ss.proteins_path)
                 ss.poa1_result = result
+                ss.conservancy_ready = False
                 status.update(label="POA1 concluído.", state="complete")
             except Exception as exc:
                 status.update(label="POA1 falhou.", state="error")
@@ -308,6 +452,28 @@ def step_poa1():
 
     if ss.poa1_result is not None:
         df = ss.poa1_result.predictions
+
+        diag = backend.species_diagnostics(ss.proteins_path, df)
+        if diag["predicted"]:
+            st.success("Espécies identificadas nos epítopos: " + ", ".join(diag["predicted"]))
+        else:
+            st.error("Nenhuma espécie foi identificada nos epítopos.")
+        if diag["unnamed"]:
+            st.error("Há epítopos sem espécie no cabeçalho. Os arquivos de predição precisam usar "
+                     "`Proteína_Espécie_ID`; para JSONs originais do BepiPred-2.0 use o adaptador "
+                     "da etapa 2.")
+        if diag["missing_from_reference"]:
+            st.error("Espécies presentes nas predições mas **ausentes do FASTA de referência (-f)**: "
+                     + ", ".join(diag["missing_from_reference"]) +
+                     ". Adicione as proteínas dessas espécies na etapa 1 — sem elas a análise de "
+                     "conservância (etapa 4) compara epítopos com as proteínas erradas.")
+        if diag["unpredicted"]:
+            st.warning("Espécies no -f sem nenhum epítopo predito: " + ", ".join(diag["unpredicted"]))
+        if diag["reference"] and diag["predicted"] and not set(diag["reference"]) & set(diag["predicted"]):
+            st.warning("Nenhuma espécie do -f coincide com as das predições. Verifique na etapa 1 a "
+                       "tabela de leitura dos cabeçalhos — se a coluna Espécie estiver mostrando o "
+                       "nome da proteína, marque a caixa de inversão `Espécie_Proteína`.")
+
         st.subheader("Epítopos consolidados")
         st.dataframe(df, use_container_width=True, height=320)
 
@@ -340,18 +506,44 @@ def step_conservancy():
     ss.threshold = st.number_input("Limiar de identidade de sequência (%)", 1, 100, ss.threshold)
     mode = st.radio("Modo", ["Reimplementação local (recomendado)", "Upload manual dos CSVs"])
 
+    # POA1 wrote one epitope FASTA per species; each must be compared against its OWN protein set.
+    epitope_files = sorted(ctx.conservancy_epitopes_dir.glob("*_epitopes.fasta"))
+    species = [f.name[: -len("_epitopes.fasta")].upper() for f in epitope_files]
+    if not species:
+        st.warning("O POA1 não gerou nenhum arquivo de epítopos por espécie. Verifique a etapa 3.")
+        return
+    st.info(f"{len(species)} espécie(s) a analisar: " + ", ".join(species))
+
     if mode.startswith("Reimplementação"):
-        st.write("Conjunto de proteínas para comparação (padrão: as proteínas carregadas na etapa 1).")
-        comp = st.file_uploader("FASTA de comparação (opcional)", type=["fasta", "fa", "txt"], key="comp_fasta")
-        comp_path = ss.proteins_path
-        if comp is not None:
-            comp_path = backend.save_upload(ctx.inputs_dir, "comparison.fasta", comp.getvalue())
+        st.write("Conjunto de proteínas para comparação. O padrão é o FASTA da etapa 1, "
+                 "**filtrado por espécie**: os epítopos de cada espécie são comparados apenas com "
+                 "as proteínas dela. Envie abaixo um conjunto próprio (ex.: o *world set* de "
+                 "diversidade) para qualquer espécie que precise de um.")
+        for sp in species:
+            up = st.file_uploader(f"FASTA de comparação para {sp} (opcional)",
+                                  type=["fasta", "fa", "faa", "txt"], key=f"comp_{sp}")
+            if up is not None:
+                ss.comparison_sets[sp] = backend.save_upload(
+                    ctx.inputs_dir, f"comparison_{sp}.fasta", up.getvalue())
+            chosen = ss.comparison_sets.get(sp)
+            if chosen:
+                st.caption(f"↳ {sp}: conjunto próprio (`{Path(chosen).name}`).")
+            else:
+                n_ref = len([x for x in backend.species_in_fasta(ss.proteins_path or "") if x == sp])
+                if n_ref:
+                    st.caption(f"↳ {sp}: {n_ref} proteína(s) do -f.")
+                else:
+                    st.warning(f"↳ {sp}: nenhuma proteína dessa espécie no -f — será comparada com "
+                               "o conjunto completo (identidades misturam espécies). Envie um "
+                               "conjunto próprio ou corrija o FASTA da etapa 1.")
+
         if st.button("▶️ Calcular conservância (local)", type="primary"):
             with st.status("Calculando conservância…", expanded=True) as status:
                 try:
                     written = conservancy_client.run_conservancy_for_dir(
-                        str(ctx.conservancy_epitopes_dir), comp_path, float(ss.threshold),
-                        str(ctx.conservancy_csv_dir))
+                        str(ctx.conservancy_epitopes_dir), ss.proteins_path, float(ss.threshold),
+                        str(ctx.conservancy_csv_dir),
+                        specie_proteins={k: v for k, v in ss.comparison_sets.items() if k in species})
                     ss.conservancy_ready = len(written) > 0
                     status.update(label=f"{len(written)} CSV(s) gerado(s).", state="complete")
                 except Exception as exc:
@@ -369,16 +561,85 @@ def step_conservancy():
     csvs = list(ctx.conservancy_csv_dir.glob("*.csv"))
     if csvs:
         st.info("CSVs disponíveis: " + ", ".join(c.name for c in csvs))
+        st.caption("Gravados em:")
+        st.code(str(ctx.conservancy_csv_dir), language=None)
+        for c in csvs:
+            _download(c, f"⬇️ {c.name}", "text/csv")
 
 
 # =========================================================================== STEP 5
+def _resume_from_results():
+    """
+    Continue an analysis from what is already in ``results/``.
+
+    The session state lives in the Streamlit process, but the files do not — so a run started in
+    one environment (Windows) can be finished in another (WSL, the only place pyTMHMM builds)
+    without redoing steps 1-4.
+    """
+    found = backend.resumable_run(ctx)
+    csvs, fastas = found["csvs"], found["references"]
+    if not csvs:
+        return
+    st.divider()
+    st.info(f"Encontrei {len(csvs)} CSV(s) de conservância já gravados em "
+            f"`results/conservancy_csv/`: " + ", ".join(c.name for c in csvs))
+    st.caption("Use isto para continuar uma análise iniciada em outra sessão — por exemplo ao "
+               "trocar do Windows para a WSL só para rodar o POA2.")
+
+    if not fastas:
+        st.warning("Nenhum FASTA de proteínas em `results/inputs/` — o POA2 precisa do `-f`.")
+        return
+    # Label each candidate with the species its headers carry, so a file that merged
+    # non-conforming headers is visible as such instead of being picked by accident.
+    wanted = sorted({c.name[: -len("_conservancy.csv")].upper() for c in csvs})
+    labels, paths = [], []
+    for f in fastas:
+        species = backend.species_in_fasta(str(f))
+        covers = [sp for sp in wanted if sp in species]
+        mark = "✅" if len(covers) == len(wanted) else ("⚠️" if covers else "❌")
+        labels.append(f"{mark} {f.name} — espécies: {', '.join(species) or 'nenhuma'}")
+        paths.append(f)
+    default = next((i for i, f in enumerate(fastas)
+                    if set(wanted) <= set(backend.species_in_fasta(str(f)))), 0)
+    pick = st.selectbox("FASTA de proteínas (-f) usado naquela análise", range(len(labels)),
+                        index=default, format_func=lambda i: labels[i])
+    st.caption(f"O POA2 precisa das proteínas de: {', '.join(wanted)}. Um `-f` com espécies a mais "
+               "(ex.: cabeçalhos não convertidos) faz um mesmo epítopo casar com vários registros.")
+    if st.button("Retomar com estes arquivos"):
+        ss.proteins_path = str(paths[pick])
+        ss.conservancy_ready = True
+        # also rebuild the POA1 table from the epitope FASTAs, so the results (etapa 6) and the
+        # 2D/3D views (etapa 7) work in the resumed session too
+        if ss.poa1_result is None:
+            ss.poa1_result = backend.poa1_result_from_disk(ctx)
+        st.rerun()
+
+
 def step_poa2():
     st.header("5 · POA2 — conservação e topologia de membrana")
     if not ss.conservancy_ready:
         st.warning("Prepare a Conservancy Analysis (etapa 4) primeiro.")
+        _resume_from_results()
+        return
+    if not ss.proteins_path:
+        st.warning("O POA2 precisa do FASTA de proteínas (-f) — volte à etapa 1.")
         return
     if not tmhmm_client.is_available():
-        st.error("pyTMHMM não está instalado. Instale com `pip install pyTMHMM` para rodar o POA2.")
+        st.error("**pyTMHMM não está instalado neste ambiente** — sem ele o POA2 não roda.")
+        if sys.platform == "win32":
+            st.warning(
+                "No Windows, `pip install pyTMHMM` **não funciona**: não existe *wheel* para "
+                "Windows, o build precisa do Microsoft C++ Build Tools e o pacote (1.3.6) não "
+                "compila contra numpy 2.x (usa `np.int_t`). Rode a interface pela **WSL**, onde o "
+                "ambiente já está pronto — veja `TESTING_WSL.md`:")
+            st.code("wsl\nconda activate poa\ncd /mnt/c/Users/<você>/…/POA_Project\n"
+                    "streamlit run poa/gui/app.py", language="bash")
+            st.caption("Abra `http://localhost:8501` no navegador do Windows. A pasta `results/` é "
+                       "a mesma nos dois lados, então tudo o que você já gerou continua valendo — "
+                       "basta ir direto para a etapa 5.")
+        else:
+            st.info("Instale no ambiente atual (precisa de compilador C e `numpy<2`):")
+            st.code('pip install "numpy<2"\npip install --no-build-isolation pyTMHMM', language="bash")
         return
 
     c1, c2, c3 = st.columns(3)

@@ -21,7 +21,7 @@ from __future__ import annotations
 import csv
 import io
 import os
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from Bio import SeqIO
 
@@ -134,33 +134,80 @@ def run_conservancy(
     return rows_to_csv(rows)
 
 
+def specie_of_header(name: str) -> str:
+    """Species token of a ``Protein_Specie_ID`` header (upper-cased); ``''`` if absent."""
+    parts = str(name).upper().split("_")
+    return parts[1] if len(parts) > 1 else ""
+
+
+def group_proteins_by_specie(
+    proteins: Sequence[Tuple[str, str]]
+) -> Dict[str, List[Tuple[str, str]]]:
+    """Bucket ``(name, sequence)`` pairs by the species token of their header."""
+    groups: Dict[str, List[Tuple[str, str]]] = {}
+    for name, seq in proteins:
+        groups.setdefault(specie_of_header(name), []).append((name, seq))
+    groups.pop("", None)
+    return groups
+
+
 def run_conservancy_for_dir(
     poa1_conservancy_dir: str,
     proteins: str | Sequence[Tuple[str, str]],
     threshold: float,
     out_dir: str,
+    specie_proteins: Optional[Mapping[str, "str | Sequence[Tuple[str, str]]"]] = None,
+    per_specie: bool = True,
 ) -> List[str]:
     """
     Process every ``*_epitopes.fasta`` produced by POA1 and write one conservancy CSV per file.
 
     This replaces the manual "submit each FASTA to the IEDB web tool and download the CSV" step.
 
+    POA1 writes one ``<SPECIE>_epitopes.fasta`` per species, and each species must be compared
+    against **its own** protein set — comparing DENV1 epitopes to a CHIKV protein set yields
+    meaningless identities. The comparison set for ``<SPECIE>`` is chosen in this order:
+
+    1. ``specie_proteins[SPECIE]`` — an explicit per-species set (e.g. its world/diversity FASTA);
+    2. the records of ``proteins`` whose header species token is ``SPECIE``;
+    3. the whole ``proteins`` set (with a warning when it covers other species too).
+
     Returns:
         list of written CSV file paths (ready to be consumed by POA2 via ``-d``).
     """
     protein_pairs = _read_fasta_pairs(proteins) if isinstance(proteins, str) else list(proteins)
+    by_specie = group_proteins_by_specie(protein_pairs) if per_specie else {}
+    explicit = {
+        str(k).upper(): (_read_fasta_pairs(v) if isinstance(v, str) else list(v))
+        for k, v in (specie_proteins or {}).items()
+    }
     os.makedirs(out_dir, exist_ok=True)
 
     written = []
     for fname in sorted(os.listdir(poa1_conservancy_dir)):
         if not fname.endswith("_epitopes.fasta"):
             continue
+        specie = fname[: -len("_epitopes.fasta")].upper()
+
+        if explicit.get(specie):
+            pairs, origin = explicit[specie], "conjunto próprio da espécie"
+        elif by_specie.get(specie):
+            pairs, origin = by_specie[specie], f"{len(by_specie[specie])} proteína(s) de {specie}"
+        else:
+            pairs, origin = protein_pairs, "conjunto completo (sem correspondência por espécie)"
+            if len(by_specie) > 1:
+                logger.warning(
+                    "%s: no protein of species '%s' in the comparison set (species found: %s). "
+                    "Falling back to the full set — the identities will mix species.",
+                    fname, specie, ", ".join(sorted(by_specie)),
+                )
+
         src = os.path.join(poa1_conservancy_dir, fname)
-        csv_text = run_conservancy(src, protein_pairs, threshold)
+        csv_text = run_conservancy(src, pairs, threshold)
         out_name = fname.replace("_epitopes.fasta", "_conservancy.csv")
         out_path = os.path.join(out_dir, out_name)
         with open(out_path, "w", encoding="utf-8", newline="") as fh:
             fh.write(csv_text)
-        logger.info("Conservancy CSV written: %s", out_path)
+        logger.info("Conservancy CSV written: %s (%s vs %s)", out_path, specie, origin)
         written.append(out_path)
     return written

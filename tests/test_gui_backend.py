@@ -4,7 +4,61 @@ from pathlib import Path
 
 import pandas as pd
 
-from poa.gui import backend
+from poa.gui import backend, viz
+
+
+def test_default_results_root_is_inside_the_project(monkeypatch, tmp_path):
+    monkeypatch.delenv("POA_RESULTS_DIR", raising=False)
+    root = backend.default_results_root()
+    assert root == backend.REPO_ROOT / "results"
+    assert (backend.REPO_ROOT / "poa" / "gui" / "backend.py").exists()  # REPO_ROOT is the repo
+
+    monkeypatch.setenv("POA_RESULTS_DIR", str(tmp_path / "elsewhere"))
+    assert backend.default_results_root() == tmp_path / "elsewhere"
+
+
+def test_work_context_creates_the_whole_tree(tmp_path):
+    ctx = backend.WorkContext(tmp_path / "results")
+    for d in (ctx.inputs_dir, ctx.mhcii_dir, ctx.poa1_out_dir,
+              ctx.conservancy_csv_dir, ctx.poa2_out_dir, ctx.cache_dir):
+        assert d.is_dir()
+        assert str(d).startswith(str(ctx.root))
+
+
+def test_resumable_run_finds_previous_outputs(tmp_path):
+    ctx = backend.WorkContext(tmp_path / "results")
+    assert backend.resumable_run(ctx) == {"csvs": [], "references": []}
+
+    (ctx.conservancy_csv_dir / "DENV1_conservancy.csv").write_text("Epitope #\n")
+    (ctx.conservancy_csv_dir / "notes.txt").write_text("ignored")
+    (ctx.inputs_dir / "proteins_all.fasta").write_text(">NS1_DENV1_ref\nMKTA\n")
+
+    found = backend.resumable_run(ctx)
+    assert [p.name for p in found["csvs"]] == ["DENV1_conservancy.csv"]
+    assert [p.name for p in found["references"]] == ["proteins_all.fasta"]
+
+
+def test_poa1_result_rebuilt_from_epitope_fastas(tmp_path):
+    ctx = backend.WorkContext(tmp_path / "results")
+    assert backend.poa1_result_from_disk(ctx) is None      # nothing on disk yet
+
+    ctx.conservancy_epitopes_dir.mkdir(parents=True, exist_ok=True)
+    (ctx.conservancy_epitopes_dir / "DENV1_epitopes.fasta").write_text(
+        ">DENV1_NS1_Bepipred2.0_3_5\nTAY\n>DENV1_NS1_Bepipred2.0_9_11\nQRQ\n")
+    (ctx.conservancy_epitopes_dir / "DENV2_epitopes.fasta").write_text(
+        ">DENV2_NS1_Bepipred2.0_3_5\nRST\n")
+
+    result = backend.poa1_result_from_disk(ctx)
+    df = result.predictions
+    assert len(df) == 3
+    assert sorted(df["Specie"].unique()) == ["DENV1", "DENV2"]
+    assert list(df["Protein"].unique()) == ["NS1"]
+    row = df.iloc[0]
+    assert row["Method"] == "Bepipred2.0"
+    assert (row["Initial Position"], row["Final Position"]) == ("3", "5")
+    assert row["Peptide Sequence"] == "TAY"
+    # the rebuilt frame feeds the 2D/3D views directly
+    assert viz.epitope_ranges(df, protein="NS1", specie="DENV1") == [(3, 5), (9, 11)]
 
 
 def test_build_poa1_args_defaults(tmp_path):
@@ -81,7 +135,7 @@ def test_run_poa1_via_context(tmp_path):
     proteins = ctx.inputs_dir / "proteins.fasta"
     proteins.write_text(">SPIKE_SARS_NP1\nMKTAYIAMKGVLMNKQRST\n")
     b3 = ctx.inputs_dir / "bp3.fasta"
-    b3.write_text(">SARS_SPIKE_NP1\nmktAYIamkgvLMNkqrst\n")
+    b3.write_text(">SPIKE_SARS_NP1\nmktAYIamkgvLMNkqrst\n")
 
     result = backend.run_poa1(ctx, {"b3": str(b3)}, {}, str(proteins))
     assert len(result.predictions) == 2

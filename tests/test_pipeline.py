@@ -19,7 +19,7 @@ def _poa1_args(tmp_path, b3, x, f, out, export="n"):
 def test_run_poa1_end_to_end(tmp_path):
     # -b3 input (uppercase = epitope): two epitopes AYI (4-6) and LMN (12-14)
     b3 = tmp_path / "bp3.fasta"
-    b3.write_text(">SARS_SPIKE_NP1\nmktAYIamkgvLMNkqrst\n")
+    b3.write_text(">SPIKE_SARS_NP1\nmktAYIamkgvLMNkqrst\n")
 
     # -x input (other predictor)
     x = tmp_path / "x.fasta"
@@ -70,7 +70,7 @@ def test_run_poa1_requires_a_method(tmp_path):
 def test_run_poa1_creates_missing_output_dir(tmp_path):
     # -d points to a directory that does not exist yet; the pipeline must create it (even with -e y).
     b3 = tmp_path / "bp3.fasta"
-    b3.write_text(">SARS_SPIKE_NP1\nmktAYIamk\n")
+    b3.write_text(">SPIKE_SARS_NP1\nmktAYIamk\n")
     f = tmp_path / "proteins.fasta"
     f.write_text(">SPIKE_SARS_NP1\nMKTAYIAMKQRST\n")
     out = tmp_path / "not_created_yet" / "out"  # nested, does not exist
@@ -83,7 +83,7 @@ def test_run_poa1_creates_missing_output_dir(tmp_path):
 
 def test_run_poa1_xlsx_export(tmp_path):
     b3 = tmp_path / "bp3.fasta"
-    b3.write_text(">SARS_SPIKE_NP1\nmktAYIamk\n")
+    b3.write_text(">SPIKE_SARS_NP1\nmktAYIamk\n")
     f = tmp_path / "proteins.fasta"
     f.write_text(">SPIKE_SARS_NP1\nMKTAYIAMKQRST\n")
     out = tmp_path / "results"

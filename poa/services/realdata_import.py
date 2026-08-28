@@ -23,8 +23,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from Bio import SeqIO
 
@@ -37,8 +37,23 @@ _FNAME_RE = re.compile(r"bepipred[_-]?(?P<virus>[a-zA-Z0-9]+)", re.IGNORECASE)
 
 
 @dataclass
+class AntigenEntry:
+    """One antigen block of a BepiPred-2.0 JSON, mapped to the pipeline header convention."""
+
+    original_key: str
+    protein: str
+    specie: str
+    id_seq: str
+    sequence: str
+
+    @property
+    def header(self) -> str:
+        return f"{self.protein}_{self.specie}_{self.id_seq}"
+
+
+@dataclass
 class Prepared:
-    """A single virus adapted to pipeline conventions."""
+    """One adapted BepiPred-2.0 JSON — one or more antigens, possibly of different species."""
 
     specie: str
     protein: str
@@ -47,10 +62,27 @@ class Prepared:
     reference_fasta: str  # path to the rebuilt -f FASTA
     b2_json: str          # path to the rewritten -b2 JSON
     has_x: bool           # reference contains an ambiguous 'X' (POA1 will refuse it)
+    entries: List[AntigenEntry] = field(default_factory=list)
 
     @property
     def header(self) -> str:
         return f"{self.protein}_{self.specie}_{self.id_seq}"
+
+    @property
+    def species(self) -> List[str]:
+        """Every species covered by this JSON, in file order."""
+        seen: List[str] = []
+        for entry in self.entries:
+            if entry.specie not in seen:
+                seen.append(entry.specie)
+        return seen or [self.specie]
+
+
+def antigen_keys(json_path: str) -> List[str]:
+    """The antigen keys of a BepiPred-2.0 JSON, in file order (for building a mapping UI)."""
+    with open(json_path, "r") as fh:
+        data = json.load(fh)
+    return list(data.get("antigens", {}))
 
 
 def specie_from_filename(path: str) -> str:
@@ -71,14 +103,22 @@ def prepare_bepipred2(
     out_dir: str,
     protein: str = "E",
     id_seq: str = "ref",
+    mapping: Optional[Dict[str, Tuple[str, str, str]]] = None,
 ) -> Prepared:
     """
     Adapt one BepiPred-2.0 JSON export to pipeline conventions.
 
     Writes, into ``out_dir``:
-      * ``<specie>_ref.fasta`` — the reference protein (``-f``), header ``Protein_Specie_ID``.
-      * ``<specie>_b2.json``   — a copy whose antigen key(s) follow ``Protein_Specie_ID`` so the
-                                 BepiPred-2.0 parser extracts species/protein correctly.
+      * ``<stem>_ref.fasta`` — the reference protein(s) (``-f``), headers ``Protein_Specie_ID``.
+      * ``<stem>_b2.json``   — a copy whose antigen key(s) follow ``Protein_Specie_ID`` so the
+                               BepiPred-2.0 parser extracts species/protein correctly.
+
+    Parameters:
+        specie / protein / id_seq: labels applied to *every* antigen in the file.
+        mapping: optional per-antigen override, ``{original_key: (protein, specie, id_seq)}``.
+            Needed when a single BepiPred run covered several organisms — a submission of
+            ``denv1_ns1`` + ``denv2_ns1`` comes back keyed ``denv1``/``denv2``, which the parser's
+            ``Protein_Specie_ID`` regex cannot resolve, so both species would be dropped.
 
     The predicted per-residue scores are copied verbatim; only the antigen key changes.
     """
@@ -94,36 +134,53 @@ def prepare_bepipred2(
     multi = len(items) > 1
 
     new_antigens: Dict[str, dict] = {}
-    records: List[Tuple[str, str]] = []
-    for i, (_old_key, antigen) in enumerate(items, start=1):
-        this_id = f"{id_seq}{i}" if multi else id_seq
-        new_key = f"{protein}_{specie}_{this_id}"
+    entries: List[AntigenEntry] = []
+    for i, (old_key, antigen) in enumerate(items, start=1):
+        if mapping and old_key in mapping:
+            prot_i, sp_i, id_i = mapping[old_key]
+            id_i = id_i or id_seq
+        else:
+            prot_i, sp_i = protein, specie
+            id_i = f"{id_seq}{i}" if multi else id_seq
+
+        entry = AntigenEntry(old_key, prot_i, sp_i, id_i, _antigen_sequence(antigen))
+        new_key, n = entry.header, 2
+        while new_key in new_antigens:   # never drop an antigen to a header collision
+            new_key = f"{entry.header}{n}"
+            n += 1
         new_antigens[new_key] = antigen
-        records.append((new_key, _antigen_sequence(antigen)))
+        entries.append(entry)
     data["antigens"] = new_antigens
 
-    b2_path = os.path.join(out_dir, f"{specie}_b2.json")
+    species = []
+    for entry in entries:
+        if entry.specie not in species:
+            species.append(entry.specie)
+    stem = "-".join(species) if mapping else specie
+
+    b2_path = os.path.join(out_dir, f"{stem}_b2.json")
     with open(b2_path, "w") as fh:
         json.dump(data, fh)
 
-    ref_path = os.path.join(out_dir, f"{specie}_ref.fasta")
+    ref_path = os.path.join(out_dir, f"{stem}_ref.fasta")
     with open(ref_path, "w") as fh:
-        for header, seq in records:
-            fh.write(f">{header}\n{seq}\n")
+        for key, entry in zip(new_antigens, entries):
+            fh.write(f">{key}\n{entry.sequence}\n")
 
-    full_seq = "".join(seq for _, seq in records)
+    full_seq = "".join(entry.sequence for entry in entries)
     has_x = "x" in full_seq.lower()
     if has_x:
-        logger.warning("%s: reference for %s contains 'X' — POA1 will refuse it (-f integrity check).", json_path, specie)
+        logger.warning("%s: reference for %s contains 'X' — POA1 will refuse it (-f integrity check).", json_path, stem)
 
     return Prepared(
-        specie=specie,
-        protein=protein,
+        specie=species[0] if mapping else specie,
+        protein=entries[0].protein if mapping else protein,
         id_seq=id_seq,
         sequence=full_seq,
         reference_fasta=ref_path,
         b2_json=b2_path,
         has_x=has_x,
+        entries=entries,
     )
 
 

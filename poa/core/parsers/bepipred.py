@@ -11,6 +11,10 @@ import numpy as np
 import pandas as pd
 from Bio import SeqIO
 
+#: how a BepiPred-2.0 antigen key is split into Protein / Specie / ID_Sequence.
+#: Exposed so callers can validate a key *before* the parser silently yields NaN species.
+BP2_ANTIGEN_KEY = r"(\w+?)_(\w+?)_(\w+)"
+
 
 def bp2_JsonAnalysis(file):
     """
@@ -81,7 +85,7 @@ def bp2_AntigenEpitopes(dataframe):
     slice_df["antigens"] = idseq
 
     # Parse species, protein, and sequence ID information
-    slice_df[["Protein", "Specie", "ID_Sequence"]] = slice_df["antigens"].str.extract(r"(\w+?)_(\w+?)_(\w+)")
+    slice_df[["Protein", "Specie", "ID_Sequence"]] = slice_df["antigens"].str.extract(BP2_ANTIGEN_KEY)
 
     # Classify residues as antigenic based on prediction score threshold
     slice_df["Classif"] = np.where(slice_df["PRED"] > 0.5, "Epitope", "-")
@@ -131,6 +135,9 @@ def bp3_FastaAnalysis(fastafile):
     """
     Processes a FASTA file output of Bepipred 3.0, identifies uppercase antigen segments.
 
+    The header must follow the pipeline convention ``Protein_Specie_ID`` (the same one used by
+    ``-f`` and by every other parser).
+
     Returns:
         pd.DataFrame: DataFrame with information on each antigen segment.
     """
@@ -139,7 +146,15 @@ def bp3_FastaAnalysis(fastafile):
     for record in SeqIO.parse(fastafile, "fasta"):
         seq_str = str(record.seq)
         header = record.id
-        sp, prot, idSeqNumber = header.split("_", 2)
+        # FIX (user-approved): the fields were read as Specie_Protein_ID, swapping the two
+        # against every other parser and against the documented `Protein_Specie_ID` header.
+        parts = header.split("_", 2)
+        if len(parts) < 3:
+            raise ValueError(
+                f"ERROR: Bepipred-3.0 header '{header}' does not follow the "
+                f"'Protein_Specie_ID' convention (e.g. 'E_DENV1_ref')."
+            )
+        prot, sp, idSeqNumber = parts
         antigenSegments = bp3_FindAntigens(seq_str)
 
         for segment in antigenSegments:

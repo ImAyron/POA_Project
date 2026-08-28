@@ -83,6 +83,22 @@ def rangeVerify(valor, lenghtProt):
         return True
 
 
+def sameVirus(epitope_virus, protein_id):
+    """
+    Whether a ``-f`` record belongs to the same organism as an epitope.
+
+    The epitope name is ``Specie_Protein_Method_Init_Final``, so its first field is the species.
+    Protein headers follow ``Protein_Specie_ID``, so the comparison is against their *species
+    field*; a plain substring test matches too much — ``DENV1`` is contained in both
+    ``DENV1_NS1`` and ``E_DENV1_REF``, which made a single epitope match two records.
+    Headers with no ``_`` have no species field and keep the original substring behaviour.
+    """
+    parts = str(protein_id).upper().split("_")
+    if len(parts) > 1:
+        return parts[1] == str(epitope_virus).upper()
+    return str(epitope_virus).upper() in str(protein_id).upper()
+
+
 def tmhmmAnalysis(args, dataframe):
     """
     Runs TMHMM on the proteins and annotates each epitope with its membrane-topology fractions.
@@ -107,8 +123,16 @@ def tmhmmAnalysis(args, dataframe):
 
     # Perform TMHMM prediction on protein sequences
     ids_TMHMM_list, seqs_TMHMM_list = pyTMHMMpredict(args.f)
+    annotation_by_id = dict(zip(ids_TMHMM_list, seqs_TMHMM_list))
+    records = [(str(rec.id).upper(), str(rec.seq).lower(), len(rec))
+               for rec in SeqIO.parse(args.f, "fasta")]
 
-    # Lists to store membrane topology classification results
+    # Lists to store membrane topology classification results — FIX: exactly ONE entry per
+    # DataFrame row. They used to be appended once per *matching protein record*, so an epitope
+    # matching two records (or none) desynchronised the lists from the frame: pandas then either
+    # rejected the assignment ("Length of values does not match length of index") or, when the
+    # extra and missing matches happened to cancel out, silently wrote each row's topology onto a
+    # different epitope.
     Out_portion_list = []
     TM_portion_list = []
     Ins_portion_list = []
@@ -131,12 +155,10 @@ def tmhmmAnalysis(args, dataframe):
         epitope = epitope.lower()
 
         # Search for matching protein sequences
-        for seq_record in SeqIO.parse(args.f, "fasta"):
-            seq_polyprot = str(seq_record.seq).lower()
-            seq_polyprot_id = seq_record.id.upper()
-
+        matches = []
+        for seq_polyprot_id, seq_polyprot, rec_lenght in records:
             # Check if the protein sequence belongs to the same virus as the epitope
-            if EpitopeVirus not in seq_polyprot_id:
+            if not sameVirus(EpitopeVirus, seq_polyprot_id):
                 continue
 
             # Ensure the epitope sequence is present in the protein sequence
@@ -145,22 +167,38 @@ def tmhmmAnalysis(args, dataframe):
                 continue
 
             # Validate epitope position values
-            start_pos_verif = rangeVerify(init_pos, len(seq_record))
-            end_pos_verif = rangeVerify(fin_pos, len(seq_record))
+            start_pos_verif = rangeVerify(init_pos, rec_lenght)
+            end_pos_verif = rangeVerify(fin_pos, rec_lenght)
             if (start_pos_verif != True) or (end_pos_verif != True):
                 raise Exception(f"Failed because epitope positions in {idt_epitope} are invalid.")
 
             # Match epitope with TMHMM prediction results
-            for x in range(len(seqs_TMHMM_list)):
-                if seq_polyprot_id == ids_TMHMM_list[x]:
-                    init = seq_polyprot.find(epitope)
-                    if init != -1:
-                        epit_lenght = len(epitope)
-                        # Calculate the percentage of residues in each membrane topology classification
-                        Out_portion, TM_portion, Ins_portion = epitTMHMMcaract(seqs_TMHMM_list[x], init, epit_lenght)
-                        Out_portion_list.append(Out_portion)
-                        TM_portion_list.append(TM_portion)
-                        Ins_portion_list.append(Ins_portion)
+            if seq_polyprot_id in annotation_by_id:
+                matches.append((seq_polyprot_id, seq_polyprot))
+
+        if not matches:
+            # No protein carries this epitope: keep the '-' placeholder for THIS row only.
+            warnings.warn(f"Epitope {idt_epitope} matched no protein in the FASTA file; its membrane topology is reported as '-'.")
+            Out_portion_list.append("-")
+            TM_portion_list.append("-")
+            Ins_portion_list.append("-")
+            continue
+
+        if len(matches) > 1:
+            warnings.warn(
+                f"Epitope {idt_epitope} matched {len(matches)} protein records "
+                f"({', '.join(m[0] for m in matches)}); using {matches[0][0]}. Check for duplicated "
+                "sequences in the -f FASTA file."
+            )
+
+        seq_polyprot_id, seq_polyprot = matches[0]
+        init = seq_polyprot.find(epitope)
+        epit_lenght = len(epitope)
+        # Calculate the percentage of residues in each membrane topology classification
+        Out_portion, TM_portion, Ins_portion = epitTMHMMcaract(annotation_by_id[seq_polyprot_id], init, epit_lenght)
+        Out_portion_list.append(Out_portion)
+        TM_portion_list.append(TM_portion)
+        Ins_portion_list.append(Ins_portion)
 
     # Update DataFrame with membrane topology classifications
     dataframe["Portion_Outside"] = Out_portion_list

@@ -37,7 +37,7 @@ def test_bepipred2_json(tmp_path):
 # --------------------------------------------------------------------------- BepiPred 3.0 (FASTA)
 def test_bepipred3_fasta(tmp_path):
     f = tmp_path / "bp3.fasta"
-    f.write_text(">SARS_SPIKE_NP1\nmktAYIamkgvLMNkqrst\n")
+    f.write_text(">SPIKE_SARS_NP1\nmktAYIamkgvLMNkqrst\n")
 
     df = bepipred.bp3_FastaAnalysis(str(f))
     df = bepipred.finalresultsBepipred(df, 0, 0, 1)
