@@ -66,7 +66,7 @@ proteína/espécie, colorida por método de predição — e visualizador 3D sob
 enviada pelo usuário, com os epítopos destacados (py3Dmol / 3Dmol.js; a renderização 3D requer
 internet, e a numeração de resíduos do PDB precisa corresponder às posições das predições).
 
-**Testes:** `pytest` — 54 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
+**Testes:** `pytest` — 82 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
 de serviço, backend da interface, visualização e o adaptador dos dados reais.
 
 > **Corrigido:** o parser do NetCTL 1.2 tinha um bug **pré-existente** (inserção de linhas por índice
@@ -75,6 +75,40 @@ de serviço, backend da interface, visualização e o adaptador dos dados reais.
 > — com aprovação explícita do usuário, por alterar quais linhas são selecionadas — para usar índice
 > sequencial e preencher apenas as linhas curtas até a contagem de colunas, mantendo a seleção `<-E`
 > documentada neste README. Coberto por testes unitários.
+
+> **Análise de várias espécies na mesma execução (corrigido):** a interface guardava um único
+> arquivo por método, então ao testar duas espécies ao mesmo tempo a segunda substituía a primeira
+> silenciosamente e o `-f` continuava sendo a referência da primeira; além disso o parser do
+> BepiPred-3.0 lia o cabeçalho como `Espécie_Proteína_ID` (invertido em relação à convenção
+> `Proteína_Espécie_ID` usada por todo o resto do pipeline), e a análise de conservância comparava
+> todas as espécies com o mesmo conjunto de proteínas. Agora: cada método aceita **um arquivo por
+> espécie** (unidos automaticamente antes do POA1), as referências são unidas em um único `-f`,
+> cada espécie é comparada com o conjunto de proteínas dela na etapa 4, e a etapa 3 exibe um
+> diagnóstico das espécies identificadas — incluindo as que aparecem nos epítopos mas faltam no
+> `-f`. Coberto por `tests/test_multispecies.py`.
+
+> **Cabeçalhos fora da convenção (corrigido):** se o JSON do BepiPred-2.0 traz várias espécies em
+> um só arquivo (chaves como `denv1`/`denv2`, sem proteína nem ID) ou se o `-f` usa
+> `Espécie_Proteína` (`denv1_ns1`), nenhuma espécie era extraída e todos os epítopos saíam sem
+> espécie. Agora o adaptador da etapa 2 mapeia **cada antígeno** para sua espécie e proteína, e a
+> etapa 1 mostra como cada cabeçalho foi interpretado, com opção de inverter os dois primeiros
+> campos.
+
+> **Saída da interface:** a GUI grava tudo em `POA_Project/results/` (antes: um diretório temporário
+> por sessão). Use a variável `POA_RESULTS_DIR` para apontar outra pasta. O caminho aparece na barra
+> lateral; como é fixo, uma nova execução sobrescreve arquivos de mesmo nome.
+
+> **POA2 no Windows:** `pip install pyTMHMM` não funciona (sem *wheel* para Windows, precisa do
+> Microsoft C++ Build Tools e o pacote não compila contra numpy 2.x). Rode a interface pela WSL,
+> apontando para a mesma pasta do projeto — veja `TESTING_WSL.md` §6.1. A etapa 5 oferece
+> **"Retomar com estes arquivos"** a partir dos CSVs já em `results/`, sem repetir as etapas 1 a 4.
+
+> **Corrigido (topologia do POA2):** `tmhmmAnalysis` preenchia as colunas `Portion_*` com um valor
+> por *registro casado* do `-f`, não por epítopo. Um `-f` com registros redundantes fazia cada
+> epítopo casar duas vezes (o teste de espécie era um *substring*: `DENV1` casa com `DENV1_NS1` e
+> com `E_DENV1_REF`) e a atribuição falhava; pior, com casamentos a mais e a menos no mesmo lote os
+> totais podiam bater e as colunas eram gravadas deslocadas, atribuindo a topologia de um epítopo a
+> outro. Agora a comparação usa o campo de espécie do cabeçalho e há exatamente um valor por linha.
 
 ## 1. INTRODUÇÃO
 

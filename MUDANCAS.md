@@ -19,7 +19,7 @@ suíte de testes — **sem alterar a lógica científica de ranqueamento e sele�
 | Indicador | Antes (`main`) | Depois (`feature/viz-realdata`) |
 |---|---|---|
 | Organização do código | 13 scripts na raiz | pacote `poa/` em 4 camadas (44 arquivos) |
-| Testes automatizados | nenhum | 54 testes (`pytest`), todos passando |
+| Testes automatizados | nenhum | 82 testes (`pytest`), todos passando |
 | Interface | apenas linha de comando | CLI (inalterada) + GUI Streamlit de 7 etapas |
 | Submissão às ferramentas web | 100% manual | automatizada ou reimplementada, com fallback manual |
 | Análise de conservação | manual no site do IEDB | reimplementação local + upload manual |
@@ -233,7 +233,125 @@ as 7 colunas padrão). Como isso muda quais linhas são selecionadas, a alteraç
 **aprovada explicitamente pelo usuário**. Coberta por testes de caminho feliz, ausência de dados e
 exclusão de linhas não-epítopo.
 
-### 7.2 Robustez
+### 7.2 Análise de mais de uma espécie na mesma execução (correção)
+
+Ao testar **duas espécies ao mesmo tempo**, as etapas 3 (POA1) e 4 (Conservancy) não conseguiam
+identificar as espécies. Três causas independentes:
+
+1. **Parser do BepiPred-3.0 lia o cabeçalho invertido.** `bp3_FastaAnalysis` fazia
+   `sp, prot, idSeqNumber = header.split("_", 2)`, mas a convenção documentada — e usada pelo `-f`,
+   pelo BepiPred-2.0, pelo PAP/IMED, pelo NetCTL, pelo MHC-II e pelo parser de "outros" — é
+   `Proteína_Espécie_ID`. O resultado era espécie e proteína trocadas em toda a análise (a espécie
+   virava o nome da proteína). Corrigido para `prot, sp, idSeqNumber`, com erro explícito quando o
+   cabeçalho não tem os três campos.
+2. **A GUI guardava um único arquivo por método.** Cada `st.file_uploader` (e cada importação de
+   JSON do BepiPred-2.0) sobrescrevia `poa1_files[chave]`, então o segundo organismo **substituía
+   silenciosamente** o primeiro; além disso o `-f` continuava sendo a referência da primeira
+   espécie. Agora a GUI acumula uma *lista* de arquivos por método e os funde antes do POA1
+   (`backend.merge_bepipred2` / `merge_fastas` / `merge_text`, orquestrados por
+   `consolidate_sources`), e todas as referências reconstruídas são unidas em um único `-f`.
+3. **A conservância comparava todas as espécies com o mesmo conjunto de proteínas.** O POA1 grava
+   um `<ESPÉCIE>_epitopes.fasta` por espécie, mas `run_conservancy_for_dir` usava o mesmo conjunto
+   de comparação para todos — epítopos de DENV1 medidos contra proteínas de CHIKV dão identidades
+   sem sentido. Agora cada espécie é comparada com **o conjunto dela**: um conjunto próprio
+   informado por espécie (ex.: o *world set* de diversidade), ou o subconjunto do `-f` cujo
+   cabeçalho tem aquela espécie; o conjunto completo continua sendo o *fallback*, com aviso.
+
+A etapa 3 passou a mostrar um diagnóstico de espécies (`backend.species_diagnostics`): quais
+espécies estão no `-f`, quais aparecem nos epítopos, quais têm epítopos **sem proteína
+correspondente no `-f`** (a falha que produzia conservância sem sentido) e quais ficaram sem
+nenhum epítopo. A etapa 1 também passou a listar as espécies detectadas nos cabeçalhos.
+
+### 7.3 Cabeçalhos fora da convenção — espécie não identificada
+
+Duas formas dos arquivos reais em que **nenhuma espécie era extraída** (todos os epítopos com
+`Specie = NaN`, gerando um único `nan_epitopes.fasta`):
+
+* **Um JSON do BepiPred-2.0 com várias espécies.** Submeter `denv1_ns1` + `denv2_ns1` numa só
+  execução devolve as chaves de antígeno `denv1` e `denv2` — um único campo, sem proteína e sem ID.
+  A regex `(\w+?)_(\w+?)_(\w+)` do parser não casa e as duas espécies caem fora. O adaptador
+  passou a aceitar um **mapeamento por antígeno** (`prepare_bepipred2(..., mapping=...)`), e a
+  etapa 2 mostra um formulário com uma linha por antígeno (espécie + proteína), reconstruindo o
+  `-f` de todos eles a partir dos arrays `AA`.
+* **`-f` com cabeçalhos `Espécie_Proteína`.** `denv1_ns1` é lido como Proteína=DENV1,
+  Espécie=NS1 — a ordem documentada é `Proteína_Espécie_ID`. A etapa 1 passou a exibir uma tabela
+  de como cada cabeçalho foi interpretado e oferece a inversão dos dois primeiros campos
+  (`normalize_fasta_headers`), que reescreve apenas os cabeçalhos, nunca as sequências.
+
+O upload do BepiPred-2.0 passou a ser **um só controle, validado no envio**: as chaves de
+antígeno são conferidas contra `Protein_Specie_ID` (`bepipred.BP2_ANTIGEN_KEY`, agora exposto como
+constante). Se conformarem, o arquivo é usado direto; se não, ele é recusado com a lista das chaves
+problemáticas e o formulário de mapeamento é aberto ali mesmo — antes era possível enviar o JSON
+pelo uploader simples e só descobrir o problema duas etapas adiante, com todos os epítopos sem
+espécie. A etapa 3 também avisa quando nenhuma espécie do `-f` coincide com as das predições,
+apontando a caixa de inversão de cabeçalhos.
+
+### 7.4 Saída da interface em `results/` (antes era `%TEMP%`)
+
+A GUI criava um diretório de trabalho novo em `%TEMP%\poa_gui_XXXX` a cada inicialização — difícil
+de achar, diferente a cada execução e sujeito à limpeza de disco do Windows. Passou a gravar tudo
+em **`POA_Project/results/`** (`backend.default_results_root()`, sobrescrevível pela variável de
+ambiente `POA_RESULTS_DIR`), mantendo a mesma árvore: `inputs/`, `mhcii/`, `poa1_out/`
+(com `Conservancy Analysis/`), `conservancy_csv/`, `poa2_out/`, `cache/`. A pasta já estava no
+`.gitignore`. O caminho aparece na barra lateral e na etapa 4, que também ganhou botões de download
+dos CSVs de conservância. Como a pasta é fixa, uma nova execução sobrescreve arquivos de mesmo nome
+— o aviso está na barra lateral.
+
+### 7.5 POA2 no Windows — orientação correta e retomada da análise
+
+A etapa 5 dizia "Instale com `pip install pyTMHMM`", o que **não funciona no Windows**: não há
+*wheel* publicada (só macOS arm64/cp311), o build exige o Microsoft C++ Build Tools e o pyTMHMM
+1.3.6 usa `np.int_t`, removido no numpy 2.x — verificado nesta máquina, o build falha em
+`hmm.pyx:40: Invalid type`. A mensagem passou a ser específica por plataforma: no Windows aponta a
+WSL (onde o ambiente conda `poa` do `TESTING_WSL.md` já tem o pyTMHMM compilado); nos demais
+sistemas mostra o comando que realmente funciona (`numpy<2` + `--no-build-isolation`).
+
+Como a sessão do Streamlit vive no processo e os arquivos não, trocar de ambiente significaria
+refazer tudo. A etapa 5 ganhou **"Retomar com estes arquivos"**: detecta os CSVs em
+`results/conservancy_csv/` (via `backend.resumable_run`), deixa escolher o `-f` entre os FASTAs de
+`results/inputs/` e segue direto para o POA2. Junto veio a correção de um bug introduzido com a
+tabela de cabeçalhos: `_refresh_reference()` zerava o `-f` sempre que a etapa 1 era renderizada
+sem uploads, apagando uma referência adotada em outro lugar; agora só limpa quando explicitamente
+pedido (`allow_clear=True`, usado pelo botão "Limpar espécies importadas").
+
+### 7.6 `tmhmmAnalysis` — colunas de topologia desalinhadas (correção científica)
+
+Bug **pré-existente** em `poa/core/topology.py`. As listas `Portion_Outside/TM/Inside` eram
+preenchidas com um `append` **por registro do `-f` que casava** com o epítopo, e depois atribuídas
+como colunas do DataFrame — o que só funciona se cada epítopo casar com exatamente um registro.
+Duas consequências:
+
+* **≠ 1 casamento → erro.** Com `proteins_all.fasta` (4 registros: `denv1_ns1`, `denv2_ns1`,
+  `E_DENV1_ref`, `E_DENV2_ref`), cada epítopo casava com 2 → `ValueError: Length of values (32)
+  does not match length of index (16)`.
+* **Pior: corrupção silenciosa.** Se num mesmo lote alguns epítopos casassem 2 vezes e outros
+  nenhuma, os totais podiam coincidir e as colunas eram gravadas **deslocadas** — a topologia de
+  um epítopo atribuída a outro, sem erro nenhum.
+
+A causa do casamento múltiplo era o teste `if EpitopeVirus not in seq_polyprot_id`, um *substring*:
+`DENV1` está contido tanto em `DENV1_NS1` quanto em `E_DENV1_REF`.
+
+Correção: (a) `sameVirus()` compara o **campo de espécie** do cabeçalho (`Protein_Specie_ID`),
+mantendo o comportamento de substring só para cabeçalhos sem `_`; (b) as listas passaram a ter
+**exatamente um valor por linha** — o primeiro registro casado, com aviso quando há mais de um
+(`-f` duplicado), e o marcador `-` preservado na própria linha quando não há nenhum, em vez de
+deslocar todas as seguintes. Como isso altera resultados nos casos de 0 ou ≥2 casamentos (antes:
+erro ou desalinhamento), a mudança precisa da sua confirmação. Coberta por 4 testes novos.
+
+A etapa 5 também passou a rotular cada `-f` candidato na retomada com as espécies que ele contém
+(✅/⚠️/❌ conforme cubra as espécies dos CSVs), para não escolher por engano um FASTA que juntou
+cabeçalhos não convertidos.
+
+### 7.7 Retomada reconstrói também a tabela do POA1
+
+A retomada da etapa 5 restaurava só o `-f` e os CSVs, então as etapas 6 (resultados) e 7
+(visualização 2D/3D) continuavam bloqueadas por `poa1_result is None`. Agora
+`backend.poa1_result_from_disk()` reconstrói a tabela de epítopos a partir dos
+`<ESPÉCIE>_epitopes.fasta` que o próprio POA1 gravou — os cabeçalhos
+`Espécie_Proteína_Método_Início_Fim` carregam todas as colunas padrão exceto `ID_Sequence` — e a
+sessão retomada abre os mapas 2D/3D normalmente.
+
+### 7.8 Robustez
 
 * Criação automática dos diretórios de saída do POA1 (`-d`) e do POA2, evitando falha quando a
   pasta ainda não existe (sem impacto científico).
@@ -246,7 +364,7 @@ exclusão de linhas não-epítopo.
 
 ## 8. Testes
 
-Suíte com **54 testes**, todos passando (`pytest`, configuração em `pytest.ini`):
+Suíte com **82 testes**, todos passando (`pytest`, configuração em `pytest.ini`):
 
 | Arquivo | Cobertura |
 |---|---|

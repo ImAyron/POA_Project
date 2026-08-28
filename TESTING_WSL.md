@@ -237,6 +237,25 @@ Percorra as 6 etapas: envie `proteins.fasta`, automatize/faça upload das predi�
 (veja tabela + gráficos), calcule a Conservancy local, rode o POA2 e baixe os resultados.
 Para parar: `Ctrl+C` no terminal.
 
+### 6.1 Rodar a GUI diretamente sobre a pasta do Windows
+
+Não é preciso copiar o projeto: a WSL enxerga o disco do Windows em `/mnt/c`. Rodando de lá, a
+pasta `results/` é **a mesma** que a do Windows, então uma análise começada no Windows pode ser
+terminada aqui.
+
+```bash
+conda activate poa
+cd /mnt/c/Users/<você>/OneDrive/Desktop/POA/POA_Project
+streamlit run poa/gui/app.py
+```
+
+**Este é o caminho recomendado para o POA2 no Windows.** `pip install pyTMHMM` não funciona lá:
+não há *wheel* para Windows, o build exige o Microsoft C++ Build Tools e o pacote 1.3.6 não
+compila contra numpy 2.x. Como a sessão do Streamlit não é compartilhada entre processos, a
+**etapa 5 oferece "Retomar com estes arquivos"** quando encontra CSVs de conservância em
+`results/conservancy_csv/` — basta escolher o FASTA de proteínas (`-f`) e seguir, sem repetir as
+etapas 1 a 4.
+
 ---
 
 ## 7. Solução de problemas
