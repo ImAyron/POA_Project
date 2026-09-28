@@ -19,7 +19,7 @@ suíte de testes — **sem alterar a lógica científica de ranqueamento e sele�
 | Indicador | Antes (`main`) | Depois (`feature/viz-realdata`) |
 |---|---|---|
 | Organização do código | 13 scripts na raiz | pacote `poa/` em 4 camadas (44 arquivos) |
-| Testes automatizados | nenhum | 82 testes (`pytest`), todos passando |
+| Testes automatizados | nenhum | 103 testes (`pytest`), todos passando |
 | Interface | apenas linha de comando | CLI (inalterada) + GUI Streamlit de 7 etapas |
 | Submissão às ferramentas web | 100% manual | automatizada ou reimplementada, com fallback manual |
 | Análise de conservação | manual no site do IEDB | reimplementação local + upload manual |
@@ -364,7 +364,7 @@ sessão retomada abre os mapas 2D/3D normalmente.
 
 ## 8. Testes
 
-Suíte com **82 testes**, todos passando (`pytest`, configuração em `pytest.ini`):
+Suíte com **103 testes**, todos passando (`pytest`, configuração em `pytest.ini`):
 
 | Arquivo | Cobertura |
 |---|---|

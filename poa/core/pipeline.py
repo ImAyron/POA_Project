@@ -222,8 +222,14 @@ def run_poa2(args) -> Poa2Result:
     else:
         type_symbol = "<"
 
-    # Organize the results of the conservancy analysis
-    ConservancyAnalysis_DF = conservancy.EpitConservAnalysis(args.t, type_symbol, args.m, args.imax, args.imin, args.d)
+    # Organize the results of the conservancy analysis. The threshold/operator are checked against
+    # the CSVs being filtered: -t used to only rename a column, so a run could report "conserved at
+    # >=70%" while filtering data computed at <=100%.
+    ConservancyAnalysis_DF = conservancy.EpitConservAnalysis(
+        args.t, type_symbol, args.m, args.imax, args.imin, args.d,
+        identity_filter=bool(getattr(args, "idf", False)),
+        strict=bool(getattr(args, "strict", False)),
+    )
 
     # Perform TMHMM prediction on epitopes
     POA2_df = topology.tmhmmAnalysis(args, ConservancyAnalysis_DF)

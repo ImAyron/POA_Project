@@ -19,6 +19,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from Bio import SeqIO
 
+from poa.core.parsers import conservancy as conservancy_parser
 from poa.gui import backend, viz
 from poa.logging_conf import setup_logging
 from poa.services import (
@@ -50,6 +51,7 @@ def _init_state():
     ss.setdefault("prepared_b2", [])       # Prepared records from the BepiPred-2.0 adapter
     ss.setdefault("poa1_result", None)
     ss.setdefault("threshold", 70)
+    ss.setdefault("cons_operator", ">=")   # '>=' conserved | '<' unique — must match the POA2 objective
     ss.setdefault("conservancy_ready", False)
     ss.setdefault("comparison_sets", {})   # SPECIE -> comparison FASTA path
     ss.setdefault("poa2_result", None)
@@ -495,6 +497,50 @@ def step_poa1():
 
 
 # =========================================================================== STEP 4
+def _declare_uploaded_threshold():
+    """
+    Record the threshold/operator behind manually uploaded conservancy CSVs.
+
+    POA2 validates what it is filtering against this record. IEDB spells both values in the CSV
+    header, so they are read from there when present and only asked for when they are not.
+    """
+    csv_dir = str(ctx.conservancy_csv_dir)
+    source = conservancy_parser.inspect_directory(csv_dir)
+
+    if source.origin == "meta":
+        st.success(f"Registrado: limiar **{conservancy_parser.format_threshold(source.threshold)}%**, "
+                   f"critério **{source.operator}**. A etapa 5 vai conferir estes valores.")
+        return
+
+    if source.origin == "header":
+        detected_op = source.operator or ">="
+        st.info(f"O cabeçalho dos CSVs declara limiar "
+                f"**{conservancy_parser.format_threshold(source.threshold)}%** e critério "
+                f"**{detected_op}**.")
+        if st.button("Registrar estes valores", key="cons_adopt_header"):
+            conservancy_parser.write_metadata(csv_dir, source.threshold, detected_op, source="iedb")
+            ss.threshold = int(source.threshold)
+            ss.cons_operator = ">=" if conservancy_parser.operator_family(detected_op) == "ge" else "<"
+            st.rerun()
+        return
+
+    st.warning("O cabeçalho destes CSVs não traz o limiar usado. Informe-o abaixo — sem isso a "
+               "etapa 5 não tem como validar o que está filtrando.")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        man_t = st.number_input("Limiar usado (%)", 1, 100, int(ss.threshold), key="man_cons_t")
+    with c2:
+        man_op = st.radio("Critério usado", [">=", "<"],
+                          index=0 if ss.cons_operator == ">=" else 1,
+                          format_func=lambda op: "Conservados (≥)" if op == ">=" else "Únicos (<)",
+                          horizontal=True, key="man_cons_op")
+    if st.button("Registrar", key="cons_declare_btn"):
+        conservancy_parser.write_metadata(csv_dir, man_t, man_op, source="manual")
+        ss.threshold = int(man_t)
+        ss.cons_operator = man_op
+        st.rerun()
+
+
 def step_conservancy():
     st.header("4 · Epitope Conservancy Analysis")
     if ss.poa1_result is None:
@@ -503,7 +549,18 @@ def step_conservancy():
     st.caption("O IEDB não oferece API nem versão local desta ferramenta. O POA reimplementa o "
                "cálculo localmente (Bui et al., 2007). Você também pode enviar os CSVs manualmente.")
 
-    ss.threshold = st.number_input("Limiar de identidade de sequência (%)", 1, 100, ss.threshold)
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        ss.threshold = st.number_input("Limiar de identidade de sequência (%)", 1, 100, ss.threshold)
+    with c2:
+        ss.cons_operator = st.radio(
+            "Critério", [">=", "<"],
+            index=0 if ss.cons_operator == ">=" else 1,
+            format_func=lambda op: "Conservados (≥ limiar)" if op == ">=" else "Únicos (< limiar)",
+            horizontal=True)
+    st.caption("O critério escolhido aqui decide quais proteínas contam como *match* e fica gravado "
+               "junto dos CSVs. Ele precisa ser o mesmo objetivo da etapa 5 — o POA2 recusa a "
+               "execução se divergirem, em vez de apenas rotular a coluna com o valor errado.")
     mode = st.radio("Modo", ["Reimplementação local (recomendado)", "Upload manual dos CSVs"])
 
     # POA1 wrote one epitope FASTA per species; each must be compared against its OWN protein set.
@@ -519,6 +576,7 @@ def step_conservancy():
                  "**filtrado por espécie**: os epítopos de cada espécie são comparados apenas com "
                  "as proteínas dela. Envie abaixo um conjunto próprio (ex.: o *world set* de "
                  "diversidade) para qualquer espécie que precise de um.")
+        ref_counts = backend.count_proteins_by_specie(ss.proteins_path) if ss.proteins_path else {}
         for sp in species:
             up = st.file_uploader(f"FASTA de comparação para {sp} (opcional)",
                                   type=["fasta", "fa", "faa", "txt"], key=f"comp_{sp}")
@@ -527,15 +585,23 @@ def step_conservancy():
                     ctx.inputs_dir, f"comparison_{sp}.fasta", up.getvalue())
             chosen = ss.comparison_sets.get(sp)
             if chosen:
-                st.caption(f"↳ {sp}: conjunto próprio (`{Path(chosen).name}`).")
+                n_comp = len(backend.parse_fasta_headers(chosen))
+                st.caption(f"↳ {sp}: conjunto próprio (`{Path(chosen).name}`), {n_comp} proteína(s).")
             else:
-                n_ref = len([x for x in backend.species_in_fasta(ss.proteins_path or "") if x == sp])
-                if n_ref:
-                    st.caption(f"↳ {sp}: {n_ref} proteína(s) do -f.")
+                n_comp = ref_counts.get(sp, 0)
+                if n_comp:
+                    st.caption(f"↳ {sp}: {n_comp} proteína(s) do -f.")
                 else:
                     st.warning(f"↳ {sp}: nenhuma proteína dessa espécie no -f — será comparada com "
                                "o conjunto completo (identidades misturam espécies). Envie um "
                                "conjunto próprio ou corrija o FASTA da etapa 1.")
+            # One protein cannot produce a conservancy: the epitope was predicted on it, so it
+            # matches at 100% and the result is 100% for any threshold.
+            if n_comp == 1:
+                st.warning(f"↳ {sp}: com **uma única proteína** de comparação o limiar não "
+                           "discrimina nada — todo epítopo sai com 100% de conservância, qualquer "
+                           "que seja o valor escolhido acima. Envie um conjunto de diversidade "
+                           "(ex.: o *world set* da espécie) para que o limiar tenha efeito.")
 
         if st.button("▶️ Calcular conservância (local)", type="primary"):
             with st.status("Calculando conservância…", expanded=True) as status:
@@ -543,20 +609,31 @@ def step_conservancy():
                     written = conservancy_client.run_conservancy_for_dir(
                         str(ctx.conservancy_epitopes_dir), ss.proteins_path, float(ss.threshold),
                         str(ctx.conservancy_csv_dir),
-                        specie_proteins={k: v for k, v in ss.comparison_sets.items() if k in species})
+                        specie_proteins={k: v for k, v in ss.comparison_sets.items() if k in species},
+                        operator=ss.cons_operator)
                     ss.conservancy_ready = len(written) > 0
                     status.update(label=f"{len(written)} CSV(s) gerado(s).", state="complete")
                 except Exception as exc:
                     status.update(label="Falha no cálculo de conservância.", state="error")
                     st.exception(exc)
     else:
+        st.caption("O POA2 confere com que limiar os CSVs foram gerados antes de filtrar. Quando o "
+                   "cabeçalho do arquivo traz essa informação (é o caso dos downloads do IEDB), ela "
+                   "é lida daí; senão, informe abaixo.")
         ups = st.file_uploader("CSVs da Conservancy Analysis (IEDB)", type=["csv"],
                                accept_multiple_files=True, key="cons_csvs")
         if ups:
+            # Any metadata already here describes the CSVs being replaced, not these.
+            stale = ctx.conservancy_csv_dir / conservancy_parser.METADATA_FILENAME
+            if stale.exists():
+                stale.unlink()
             for up in ups:
                 backend.save_upload(ctx.conservancy_csv_dir, up.name, up.getvalue())
             ss.conservancy_ready = True
             st.success(f"{len(ups)} CSV(s) carregado(s).")
+
+        if list(ctx.conservancy_csv_dir.glob("*.csv")):
+            _declare_uploaded_threshold()
 
     csvs = list(ctx.conservancy_csv_dir.glob("*.csv"))
     if csvs:
@@ -642,9 +719,34 @@ def step_poa2():
             st.code('pip install "numpy<2"\npip install --no-build-isolation pyTMHMM', language="bash")
         return
 
+    # The threshold POA2 applies comes from the data, not from the form: it used to only rename a
+    # column, so a run could report "conservados ≥70%" while filtering CSVs computed at ≤100%.
+    source = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
+    if source.origin == "unknown":
+        st.warning("Não foi possível descobrir com que limiar os CSVs desta pasta foram gerados — "
+                   "não há metadados e o cabeçalho não traz o valor. O POA2 vai usar o limiar da "
+                   "etapa 4 **sem conseguir validá-lo**; confira antes de usar os resultados.")
+        t_value, op_value = int(ss.threshold), ss.cons_operator
+    else:
+        t_value, op_value = int(source.threshold), source.operator
+        origem = ("metadados gravados na etapa 4" if source.origin == "meta"
+                  else "cabeçalho dos próprios CSVs")
+        st.info(f"CSVs gerados com limiar "
+                f"**{conservancy_parser.format_threshold(source.threshold)}%** e critério "
+                f"**{op_value}** (lido dos {origem}). São esses os valores que o POA2 aplica.")
+        if source.meta and source.meta.species:
+            weak = sorted(sp for sp, info in source.meta.species.items()
+                          if not info.get("discriminating", True))
+            if weak:
+                st.warning("Espécie(s) cujo conjunto de comparação tinha uma única proteína — o "
+                           "limiar não discriminou nada e a conservância saiu 100%: "
+                           + ", ".join(weak) + ". Refaça a etapa 4 com um conjunto de diversidade "
+                           "se estes resultados forem usados.")
+
     c1, c2, c3 = st.columns(3)
     with c1:
         objective = st.radio("Objetivo", ["conserved", "unique"],
+                             index=1 if conservancy_parser.operator_family(op_value) == "lt" else 0,
                              format_func=lambda x: "Conservados (≥)" if x == "conserved" else "Únicos (<)")
         rf = st.selectbox("FASTA por topologia (-rf)",
                           [None, 0, 1, 2, 3],
@@ -655,10 +757,26 @@ def step_poa2():
         imax = st.number_input("Identidade máx. (%)", 0, 100, 100)
     with c3:
         mmatch = st.number_input("% de sequências com match (-m)", 0, 100, 60)
-        st.metric("Limiar (t)", ss.threshold)
+        st.metric("Limiar aplicado (t)", f"{op_value} {t_value}%")
+        identity_filter = st.checkbox(
+            "Usar o limiar também como filtro", value=False,
+            help="Por padrão o limiar só define a coluna de % de matches, como no POA original. "
+                 "Marcado, o POA2 também descarta epítopos cuja identidade não satisfaça o "
+                 "critério: ≥ exige que a identidade mínima alcance o limiar (conservado em todo o "
+                 "conjunto); < exige que a máxima fique abaixo dele (único).")
 
-    if st.button("▶️ Executar POA2", type="primary"):
-        params = dict(objective=objective, t=ss.threshold, imin=imin, imax=imax, m=mmatch, rf=rf)
+    requested_symbol = ">=" if objective == "conserved" else "<"
+    mismatch = (source.origin != "unknown"
+                and conservancy_parser.operator_family(requested_symbol) != source.family)
+    if mismatch:
+        st.error(f"O objetivo escolhido (**{requested_symbol}**) não é o mesmo com que os CSVs "
+                 f"foram gerados (**{source.operator}**). Volte à etapa 4 e recalcule com este "
+                 "critério, ou escolha o objetivo correspondente. Filtrar com um critério e "
+                 "rotular o resultado com outro é exatamente o que esta checagem impede.")
+
+    if st.button("▶️ Executar POA2", type="primary", disabled=mismatch):
+        params = dict(objective=objective, t=t_value, imin=imin, imax=imax, m=mmatch, rf=rf,
+                      idf=identity_filter)
         with st.status("Executando POA2 (conservância + TMHMM)…", expanded=True) as status:
             try:
                 ss.poa2_result = backend.run_poa2(ctx, params, ss.proteins_path)

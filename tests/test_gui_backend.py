@@ -93,6 +93,25 @@ def test_build_poa2_args_objective_mapping(tmp_path):
     assert unique.rf is None  # empty -> None
 
 
+def test_build_poa2_args_threshold_switches(tmp_path):
+    default = backend.build_poa2_args({"objective": "conserved", "t": 70},
+                                      str(tmp_path), "prot.fasta", str(tmp_path))
+    assert default.idf is False and default.strict is False   # historical behaviour by default
+
+    opted_in = backend.build_poa2_args({"objective": "conserved", "t": 70, "idf": True, "strict": True},
+                                       str(tmp_path), "prot.fasta", str(tmp_path))
+    assert opted_in.idf is True and opted_in.strict is True
+
+
+def test_count_proteins_by_specie(tmp_path):
+    """species_in_fasta de-duplicates; the size of a comparison set is what the threshold needs."""
+    fasta = tmp_path / "prot.fasta"
+    fasta.write_text(">NS1_DENV1_a\nAAA\n>E_DENV1_b\nCCC\n>E_DENV2_c\nGGG\n")
+
+    assert backend.species_in_fasta(str(fasta)) == ["DENV1", "DENV2"]
+    assert backend.count_proteins_by_specie(str(fasta)) == {"DENV1": 2, "DENV2": 1}
+
+
 def test_import_bepipred2_adapts_upload(tmp_path):
     ctx = backend.WorkContext(tmp_path)
     raw = json.dumps({

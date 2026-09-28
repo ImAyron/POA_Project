@@ -66,7 +66,7 @@ proteína/espécie, colorida por método de predição — e visualizador 3D sob
 enviada pelo usuário, com os epítopos destacados (py3Dmol / 3Dmol.js; a renderização 3D requer
 internet, e a numeração de resíduos do PDB precisa corresponder às posições das predições).
 
-**Testes:** `pytest` — 82 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
+**Testes:** `pytest` — 103 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
 de serviço, backend da interface, visualização e o adaptador dos dados reais.
 
 > **Corrigido:** o parser do NetCTL 1.2 tinha um bug **pré-existente** (inserção de linhas por índice
@@ -378,6 +378,15 @@ Para utilizar o POA2 será necessário organizar todos os resultados da análise
 
 O usuário deverá informar ao POA2 qual foi o objetivo da análise, se esta foi feita visando encontrar epítopos conservados (>=) ou epítopos únicos (<), __parâmetro -g ou -l__, respectivamente, e qual o threshold de identidade de sequência (Sequence identity threshold) foi utilizado para fazer a predição (__parâmetro -t__).
 
+> **Esses dois valores agora são conferidos, não apenas anotados.** O POA2 lê o limiar e o critério
+> com que os CSVs foram de fato produzidos — do cabeçalho da coluna de *percent of matches*, como o
+> IEDB o escreve, ou do `conservancy_meta.json` que a etapa 4 da interface grava junto dos arquivos —
+> e **recusa a execução** quando eles não batem com `-t`/`-g|-l`. Antes, esses parâmetros apenas
+> renomeavam uma coluna: era possível filtrar dados calculados a `<= 100%` e rotular o resultado como
+> "conservados a `>= 70%`" sem nenhum aviso, e `-g` e `-l` devolviam exatamente as mesmas linhas.
+> Quando não há como descobrir o limiar de origem (CSV sem metadados e sem o valor no cabeçalho), o
+> POA2 emite um aviso e segue; `-strict` transforma esse aviso em erro.
+
 Por último, deverá apresentar um arquivo fasta que contenha todas as polyproteínas/proteínas usadas para a predição de epítopos (__parâmetro -f__). Este arquivo poderá ser igual àquele submetido no POA1, seguindo a mesma formatação (ver seção 3.1.2).
 
 
@@ -394,6 +403,10 @@ Por último, deverá apresentar um arquivo fasta que contenha todas as polyprote
  __parâmetro -imax:__ Threshold máximo de identidade aceito no resultado da análise de conservação entre os peptídeos e as proteínas avaliadas (default = 100).
  
  __parâmetro -m:__ porcentagem das sequências que tiveram match de identidade acima do threshold de identidade de sequência avaliado (parâmtero -t) (default = 60).
+
+ __parâmetro -idf:__ aplica o threshold `-t` também como critério de seleção, e não só como base da coluna de *percent of matches* (desligado por padrão, preservando o comportamento original). Com `-g`, mantém os epítopos cuja identidade **mínima** alcança o limiar (conservados em todo o conjunto); com `-l`, os cuja identidade **máxima** fica abaixo dele (únicos).
+
+ __parâmetro -strict:__ aborta quando o cabeçalho dos CSVs declara um threshold diferente de `-t`/`-g|-l`, em vez de apenas avisar (default: avisar).
  
  __parâmetro -rf:__ Opções de arquivo fasta contendo os resultados da análise de conservação (default = None). 
  [0] Todos os epitopos resultantes da análise de conservação, sem considerar a classificação por topologia de membrana.
@@ -670,6 +683,14 @@ The results from POA1 must first undergo conservancy analysis using the [Epitope
 * **parameter -d**: Directory containing the conservancy analysis results (.csv files).
 * **parameter -g or -l:**: Specifies the analysis objective: Use ```-g``` to identify conserved epitopes (>= threshold), or use ```-l``` to identify unique epitopes (< threshold).
 * **parameter -t**: Sequence identity threshold used for the conservancy analysis.
+
+> **Both values are now verified, not merely recorded.** POA2 reads back the threshold and operator
+> the CSVs were actually produced with — from the *percent of matches* column header, the way IEDB
+> spells it, or from the `conservancy_meta.json` written next to them by step 4 of the GUI — and
+> **refuses to run** when they disagree with `-t`/`-g|-l`. They previously only renamed a column, so
+> a run could filter data computed at `<= 100%` and label it "conserved at `>= 70%`", and `-g` and
+> `-l` returned exactly the same rows. When the source threshold cannot be determined, POA2 warns
+> and proceeds; `-strict` turns that warning into an error.
 * **parameter -f**: ```.fasta``` file containing all polyproteins/proteins used for epitope prediction (same file as submitted in POA1; see Section 3.1.2 POA1 - Mandatory Arguments for formatting details).
 
 #### 3.2.3 POA2 - Optional Arguments
@@ -680,6 +701,8 @@ The results from POA1 must first undergo conservancy analysis using the [Epitope
 * **parameter -imin**: Minimum identity threshold for conservancy analysis (default = 60).
 * **parameter -imax**: Maximum identity threshold for conservancy analysis (default = 100).
 * **parameter -m**: Percentage of sequences with identity matches above the threshold (default = 60).
+* **parameter -idf**: Also apply `-t` as a selection criterion, not just as the basis of the *percent of matches* column (off by default, preserving the original behaviour). With `-g` it keeps epitopes whose **minimum** identity reaches the threshold (conserved across the whole set); with `-l`, those whose **maximum** identity stays below it (unique).
+* **parameter -strict**: Abort when the CSV headers declare a threshold other than `-t`/`-g|-l`, instead of warning (default: warn).
 * **parameter -rf**: Options for organizing ```.fasta``` files based on membrane topology: [0]: All epitopes from the conservancy analysis (no membrane topology classification); [1]: Epitopes located in exposed membrane portions; [2]: Epitopes located in transmembrane portions; [3]: Epitopes located in internal membrane portions. Default = 0
 
 #### 3.2.4 Running POA2

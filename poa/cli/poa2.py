@@ -1,4 +1,6 @@
-"""POA2 command-line interface — identical arguments to the original ``POA2_v1.0.py``."""
+"""POA2 command-line interface — the original ``POA2_v1.0.py`` arguments, plus two optional
+threshold switches (``-idf``, ``-strict``) that default to the historical behaviour.
+"""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
                                     [1]epitopes in Outside portion(TMHMM)
                                     [2]epitopes in Transmembrane portion(TMHMM)
                                     [3]epitopes in Inside portion(TMHMM)''', type=int, default=None)
+    optional.add_argument("-idf", action="store_true",
+                          help="Also filter epitopes by the identity threshold itself: -g keeps "
+                               "those whose minimum identity is >= -t, -l those whose maximum "
+                               "identity is < -t. Off by default (-t only defines the percent-of-"
+                               "matches column, as in the original).")
+    optional.add_argument("-strict", action="store_true",
+                          help="Abort when the CSV headers declare a sequence identity threshold "
+                               "other than -t / -g|-l (default: warn).")
     return parser
 
 

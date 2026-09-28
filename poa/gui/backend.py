@@ -116,7 +116,10 @@ def build_poa2_args(params: Dict, csv_dir: str, proteins_path: str, out_dir: str
     Assemble a POA2 args namespace.
 
     Parameters:
-        params: keys 'objective' ('conserved'|'unique'), 't', 'imin','imax','m','rf'.
+        params: keys 'objective' ('conserved'|'unique'), 't', 'imin','imax','m','rf' and the
+            threshold-handling switches 'idf' (apply the identity threshold as a filter, not just
+            as the basis of the percent column) and 'strict' (refuse CSVs whose header declares a
+            different threshold).
     """
     conserved = params.get("objective", "conserved") == "conserved"
     return SimpleNamespace(
@@ -130,6 +133,8 @@ def build_poa2_args(params: Dict, csv_dir: str, proteins_path: str, out_dir: str
         m=int(params.get("m", 60)),
         f=proteins_path,
         rf=(None if params.get("rf", None) in (None, "") else int(params["rf"])),
+        idf=bool(params.get("idf", False)),
+        strict=bool(params.get("strict", False)),
     )
 
 
@@ -342,6 +347,20 @@ def species_in_fasta(fasta_path: str) -> List[str]:
         if row["specie"] and row["specie"] not in species:
             species.append(row["specie"])
     return species
+
+
+def count_proteins_by_specie(fasta_path: str) -> Dict[str, int]:
+    """
+    How many protein records each species contributes to a FASTA.
+
+    Distinct from :func:`species_in_fasta`, which de-duplicates: the *size* of a species'
+    comparison set is what decides whether a conservancy threshold can discriminate at all.
+    """
+    counts: Dict[str, int] = {}
+    for row in parse_fasta_headers(fasta_path):
+        if row["specie"]:
+            counts[row["specie"]] = counts.get(row["specie"], 0) + 1
+    return counts
 
 
 def species_diagnostics(proteins_path: str, predictions: pd.DataFrame) -> Dict[str, List[str]]:
