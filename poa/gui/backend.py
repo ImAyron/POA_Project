@@ -5,8 +5,12 @@ Kept free of Streamlit imports so it can be unit-tested and reused. The Streamli
 """
 from __future__ import annotations
 
+import json
 import os
+import re
+import unicodedata
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -25,23 +29,36 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def default_results_root() -> Path:
     """
-    Where the GUI writes everything: ``<repo>/results``.
+    Where the GUI keeps its analyses: ``<repo>/results``.
 
     A fixed, findable folder inside the project instead of a per-session ``%TEMP%`` directory the
     user cannot locate and Windows may clear. Override with ``POA_RESULTS_DIR`` if the results
     should live elsewhere (e.g. a shared drive).
+
+    Each analysis lives in its own ``DDMMAAAA-NOME_DO_TESTE`` subfolder (see :func:`create_run`),
+    so re-running never overwrites an earlier one. A tree written before that convention existed
+    sits directly under this root and is still usable — :func:`list_runs` reports it as legacy.
     """
     return Path(os.environ.get("POA_RESULTS_DIR") or (REPO_ROOT / "results"))
 
 
 @dataclass
 class WorkContext:
-    """Working directory tree for a GUI run (defaults to :func:`default_results_root`)."""
+    """
+    Working directory tree for one analysis.
+
+    ``cache_root`` points the prediction cache outside the analysis folder so several analyses
+    share it: cache keys are content hashes, so a second run over the same sequences reuses the
+    IEDB/BepiPred results instead of re-submitting them. Left unset, the cache stays inside
+    ``root`` (the pre-run-folder layout).
+    """
 
     root: Path
+    cache_root: Optional[Path] = None
 
     def __post_init__(self):
         self.root = Path(self.root)
+        self.cache_root = Path(self.cache_root) if self.cache_root else None
         for d in (self.inputs_dir, self.mhcii_dir, self.poa1_out_dir,
                   self.conservancy_csv_dir, self.poa2_out_dir, self.cache_dir):
             d.mkdir(parents=True, exist_ok=True)
@@ -73,10 +90,147 @@ class WorkContext:
 
     @property
     def cache_dir(self) -> Path:
-        return self.root / "cache"
+        return self.cache_root or (self.root / "cache")
 
     def cache(self) -> Cache:
         return Cache(self.cache_dir)
+
+
+# --------------------------------------------------------------------------- analysis folders
+#: ``DDMMAAAA-NOME_DO_TESTE`` — the date first so the folders sort chronologically by name.
+RUN_DIR_RE = re.compile(r"^(?P<date>\d{8})-(?P<label>.+)$")
+
+#: Written into each analysis folder so the original (unslugged) name survives.
+RUN_METADATA_FILENAME = "run.json"
+
+#: Subfolders that mark a directory as a POA analysis tree.
+_RUN_MARKERS = ("inputs", "poa1_out", "conservancy_csv", "poa2_out", "mhcii")
+
+
+def slugify_run_name(name: str) -> str:
+    """``'Teste DENV — world set' -> 'TESTE_DENV_WORLD_SET'`` (folder-safe, accent-free)."""
+    text = unicodedata.normalize("NFKD", str(name))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^A-Za-z0-9]+", "_", text.upper()).strip("_")
+    return text[:60] or "ANALISE"
+
+
+def run_dir_name(name: str, when: Optional[date] = None) -> str:
+    """The folder name for an analysis: ``DDMMAAAA-NOME_DO_TESTE``."""
+    when = when or date.today()
+    return f"{when:%d%m%Y}-{slugify_run_name(name)}"
+
+
+@dataclass
+class RunInfo:
+    """One analysis folder under the results root, with enough state to choose between them."""
+
+    path: Path
+    name: str                   # folder name, or '' for the legacy tree
+    label: str                  # the NOME_DO_TESTE part, or the name the user typed
+    date: Optional[date]
+    legacy: bool = False
+    created_at: str = ""
+    n_epitope_fastas: int = 0
+    n_csvs: int = 0
+    has_poa2: bool = False
+
+    @property
+    def progress(self) -> str:
+        """Short human summary of how far this analysis got."""
+        parts = []
+        if self.n_epitope_fastas:
+            parts.append(f"POA1: {self.n_epitope_fastas} espécie(s)")
+        if self.n_csvs:
+            parts.append(f"{self.n_csvs} CSV(s) de conservância")
+        if self.has_poa2:
+            parts.append("POA2 concluído")
+        return " · ".join(parts) or "vazia"
+
+
+def _is_run_tree(path: Path) -> bool:
+    return any((path / marker).is_dir() for marker in _RUN_MARKERS)
+
+
+def _describe_run(path: Path, name: str, label: str, when: Optional[date],
+                  legacy: bool = False) -> RunInfo:
+    created_at = ""
+    meta_path = path / RUN_METADATA_FILENAME
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            label = str(meta.get("label") or label)
+            created_at = str(meta.get("created_at", ""))
+        except (OSError, ValueError):
+            pass
+    epitopes = path / "poa1_out" / "Conservancy Analysis"
+    return RunInfo(
+        path=path,
+        name=name,
+        label=label,
+        date=when,
+        legacy=legacy,
+        created_at=created_at,
+        n_epitope_fastas=len(list(epitopes.glob("*_epitopes.fasta"))) if epitopes.is_dir() else 0,
+        n_csvs=len(list((path / "conservancy_csv").glob("*.csv"))) if (path / "conservancy_csv").is_dir() else 0,
+        has_poa2=any((path / "poa2_out").glob("*.xlsx")) if (path / "poa2_out").is_dir() else False,
+    )
+
+
+def list_runs(root: Path) -> List[RunInfo]:
+    """
+    Every analysis under ``root``, newest first.
+
+    A tree written before the run-folder convention sits directly under ``root``; it is listed
+    last, flagged ``legacy``, and keeps working where it is — nothing is moved.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+
+    runs: List[RunInfo] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        match = RUN_DIR_RE.match(entry.name)
+        if not match:
+            continue
+        try:
+            when = datetime.strptime(match.group("date"), "%d%m%Y").date()
+        except ValueError:
+            continue
+        runs.append(_describe_run(entry, entry.name, match.group("label"), when))
+
+    runs.sort(key=lambda r: (r.date or date.min, r.name), reverse=True)
+    if _is_run_tree(root):
+        runs.append(_describe_run(root, "", "(análise anterior, fora de pasta datada)", None,
+                                  legacy=True))
+    return runs
+
+
+def create_run(root: Path, name: str, when: Optional[date] = None) -> WorkContext:
+    """
+    Start a new analysis at ``root/DDMMAAAA-NOME_DO_TESTE`` and return its context.
+
+    A name already used today reuses that folder rather than silently creating a near-duplicate —
+    the point of the convention is that one test has one place.
+    """
+    root = Path(root)
+    ctx = WorkContext(root / run_dir_name(name, when), cache_root=root / "cache")
+    meta_path = ctx.root / RUN_METADATA_FILENAME
+    if not meta_path.exists():
+        meta_path.write_text(json.dumps({
+            "label": str(name).strip(),
+            "folder": ctx.root.name,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return ctx
+
+
+def open_run(root: Path, path: Path) -> WorkContext:
+    """Re-open an existing analysis (legacy tree included), sharing the root-level cache."""
+    root, path = Path(root), Path(path)
+    return WorkContext(path, cache_root=root / "cache")
 
 
 # --------------------------------------------------------------------------- argument builders

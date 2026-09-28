@@ -66,7 +66,7 @@ proteína/espécie, colorida por método de predição — e visualizador 3D sob
 enviada pelo usuário, com os epítopos destacados (py3Dmol / 3Dmol.js; a renderização 3D requer
 internet, e a numeração de resíduos do PDB precisa corresponder às posições das predições).
 
-**Testes:** `pytest` — 103 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
+**Testes:** `pytest` — 121 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
 de serviço, backend da interface, visualização e o adaptador dos dados reais.
 
 > **Corrigido:** o parser do NetCTL 1.2 tinha um bug **pré-existente** (inserção de linhas por índice
@@ -94,14 +94,22 @@ de serviço, backend da interface, visualização e o adaptador dos dados reais.
 > etapa 1 mostra como cada cabeçalho foi interpretado, com opção de inverter os dois primeiros
 > campos.
 
-> **Saída da interface:** a GUI grava tudo em `POA_Project/results/` (antes: um diretório temporário
-> por sessão). Use a variável `POA_RESULTS_DIR` para apontar outra pasta. O caminho aparece na barra
-> lateral; como é fixo, uma nova execução sobrescreve arquivos de mesmo nome.
+> **Saída da interface:** a GUI grava em `POA_Project/results/` (antes: um diretório temporário por
+> sessão), com **uma pasta por análise**, nomeada `DDMMAAAA-NOME_DO_TESTE`. Ao abrir, a interface
+> pergunta se você quer criar uma análise nova ou reabrir uma já gravada — a lista mostra a data e
+> até onde cada uma chegou. Assim repetir um teste não sobrescreve o anterior e dá para comparar os
+> dois. Use `POA_RESULTS_DIR` para apontar outra pasta-mãe. O cache de predições fica em
+> `results/cache`, **compartilhado** entre as análises: a chave é o hash do conteúdo, então uma
+> segunda análise sobre as mesmas sequências reaproveita os resultados em vez de reenviá-los.
+>
+> Uma pasta `results/` montada antes dessa convenção continua funcionando onde está: ela aparece na
+> lista como análise anterior e **nada é movido**.
 
 > **POA2 no Windows:** `pip install pyTMHMM` não funciona (sem *wheel* para Windows, precisa do
 > Microsoft C++ Build Tools e o pacote não compila contra numpy 2.x). Rode a interface pela WSL,
-> apontando para a mesma pasta do projeto — veja `TESTING_WSL.md` §6.1. A etapa 5 oferece
-> **"Retomar com estes arquivos"** a partir dos CSVs já em `results/`, sem repetir as etapas 1 a 4.
+> apontando para a mesma pasta do projeto — veja `TESTING_WSL.md` §6.1. Abra **a mesma análise** do
+> lado da WSL e a etapa 5 oferece **"Retomar com estes arquivos"** a partir dos CSVs já gravados
+> nela, sem repetir as etapas 1 a 4.
 
 > **Corrigido (topologia do POA2):** `tmhmmAnalysis` preenchia as colunas `Portion_*` com um valor
 > por *registro casado* do `-f`, não por epítopo. Um `-f` com registros redundantes fazia cada

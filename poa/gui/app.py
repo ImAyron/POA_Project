@@ -36,10 +36,15 @@ st.set_page_config(page_title="POA — Pipeline de Otimização de Antígenos", 
 
 
 # --------------------------------------------------------------------------- session state
+#: session keys holding data that belongs to one analysis — cleared when switching analyses,
+#: so a new run never inherits the previous one's file paths or results
+_ANALYSIS_KEYS = ("proteins_path", "ref_raw", "ref_uploads", "poa1_sources", "prepared_b2",
+                  "poa1_result", "conservancy_ready", "comparison_sets", "poa2_result")
+
+
 def _init_state():
     ss = st.session_state
-    if "ctx" not in ss:
-        ss.ctx = backend.WorkContext(backend.default_results_root())
+    ss.setdefault("run_path", None)        # the analysis folder this session writes to
     ss.setdefault("proteins_path", None)   # merged -f reference (all species)
     ss.setdefault("ref_raw", [])           # protein FASTAs as uploaded in step 1
     ss.setdefault("ref_swap", False)       # source headers are Specie_Protein -> swap them
@@ -59,7 +64,7 @@ def _init_state():
 
 
 ss = _init_state()
-ctx: backend.WorkContext = ss.ctx
+ctx: backend.WorkContext = None   # bound by _select_run() before any step renders
 
 
 def _collect_sources():
@@ -96,9 +101,78 @@ def _read_proteins():
     return [(rec.id, str(rec.seq)) for rec in SeqIO.parse(ss.proteins_path, "fasta")]
 
 
+# --------------------------------------------------------------------------- analysis folder
+def _reset_analysis_state():
+    """Drop everything tied to the previous analysis — its paths point into another folder."""
+    for key in _ANALYSIS_KEYS:
+        del ss[key]
+    _init_state()
+
+
+def _adopt_run(path: Path):
+    ss.run_path = str(path)
+    _reset_analysis_state()
+    st.rerun()
+
+
+def _select_run() -> backend.WorkContext:
+    """
+    Bind this session to one analysis folder, asking which before anything else runs.
+
+    Every analysis gets its own ``results/DDMMAAAA-NOME_DO_TESTE``, so a second run of the same
+    data never overwrites the first and the two can be compared side by side.
+    """
+    root = backend.default_results_root()
+
+    if ss.run_path:
+        path = Path(ss.run_path)
+        with st.sidebar:
+            st.markdown("### Análise")
+            st.success(f"**{path.name or root.name}**")
+            if st.button("Trocar de análise"):
+                ss.run_path = None
+                st.rerun()
+        return backend.open_run(root, path)
+
+    runs = backend.list_runs(root)
+    st.title("Pipeline de Otimização de Antígenos (POA)")
+    st.header("Escolha a análise")
+    st.caption(f"Cada análise fica na sua própria pasta dentro de `{root}`, nomeada "
+               "`DDMMAAAA-NOME_DO_TESTE`. Assim uma nova execução não sobrescreve a anterior e dá "
+               "para comparar as duas.")
+
+    tab_new, tab_open = st.tabs(["Nova análise", f"Abrir existente ({len(runs)})"])
+    with tab_new:
+        label = st.text_input("Nome do teste", placeholder="ex.: DENV world set")
+        if label.strip():
+            st.caption(f"Pasta: `{backend.run_dir_name(label)}`")
+        if st.button("Criar análise", type="primary", disabled=not label.strip()):
+            _adopt_run(backend.create_run(root, label).root)
+    with tab_open:
+        if not runs:
+            st.info("Nenhuma análise encontrada ainda. Crie a primeira na outra aba.")
+        else:
+            def _fmt(i):
+                run = runs[i]
+                when = run.date.strftime("%d/%m/%Y") if run.date else "sem data"
+                return f"{run.label} — {when} — {run.progress}"
+
+            picked = st.selectbox("Análises gravadas", range(len(runs)), format_func=_fmt)
+            chosen = runs[picked]
+            st.code(str(chosen.path), language=None)
+            if chosen.legacy:
+                st.info("Esta é a pasta de resultados anterior à convenção de pastas datadas. Ela "
+                        "continua utilizável onde está — nada foi movido.")
+            if st.button("Abrir análise"):
+                _adopt_run(chosen.path)
+    st.stop()
+
+
 # --------------------------------------------------------------------------- sidebar
 st.sidebar.title("🧬 POA")
 st.sidebar.caption("Pipeline de Otimização de Antígenos")
+
+ctx = _select_run()
 
 STEPS = [
     "1 · Proteínas & Parâmetros",
@@ -126,8 +200,8 @@ with st.sidebar:
     step = st.radio("Etapa", STEPS)
     st.divider()
     st.markdown("### Resultados")
-    st.caption("Tudo é gravado nesta pasta do projeto (uma nova execução sobrescreve os arquivos "
-               "de mesmo nome — copie o que quiser guardar):")
+    st.caption("Tudo desta análise é gravado aqui. Outra análise, outra pasta — repetir uma "
+               "execução nesta sobrescreve os arquivos de mesmo nome:")
     st.code(str(ctx.root), language=None)
 
 
@@ -658,13 +732,14 @@ def _resume_from_results():
     if not csvs:
         return
     st.divider()
-    st.info(f"Encontrei {len(csvs)} CSV(s) de conservância já gravados em "
-            f"`results/conservancy_csv/`: " + ", ".join(c.name for c in csvs))
+    st.info(f"Encontrei {len(csvs)} CSV(s) de conservância já gravados nesta análise "
+            f"(`{ctx.conservancy_csv_dir.name}/`): " + ", ".join(c.name for c in csvs))
     st.caption("Use isto para continuar uma análise iniciada em outra sessão — por exemplo ao "
-               "trocar do Windows para a WSL só para rodar o POA2.")
+               "trocar do Windows para a WSL só para rodar o POA2. Abra a mesma análise dos dois "
+               "lados: os arquivos estão na pasta, não na sessão.")
 
     if not fastas:
-        st.warning("Nenhum FASTA de proteínas em `results/inputs/` — o POA2 precisa do `-f`.")
+        st.warning(f"Nenhum FASTA de proteínas em `{ctx.inputs_dir.name}/` — o POA2 precisa do `-f`.")
         return
     # Label each candidate with the species its headers carry, so a file that merged
     # non-conforming headers is visible as such instead of being picked by accident.
@@ -711,9 +786,9 @@ def step_poa2():
                 "ambiente já está pronto — veja `TESTING_WSL.md`:")
             st.code("wsl\nconda activate poa\ncd /mnt/c/Users/<você>/…/POA_Project\n"
                     "streamlit run poa/gui/app.py", language="bash")
-            st.caption("Abra `http://localhost:8501` no navegador do Windows. A pasta `results/` é "
-                       "a mesma nos dois lados, então tudo o que você já gerou continua valendo — "
-                       "basta ir direto para a etapa 5.")
+            st.caption("Abra `http://localhost:8501` no navegador do Windows e **reabra esta mesma "
+                       "análise** — a pasta `results/` é a mesma nos dois lados, então tudo o que "
+                       "você já gerou continua valendo; basta ir direto para a etapa 5.")
         else:
             st.info("Instale no ambiente atual (precisa de compilador C e `numpy<2`):")
             st.code('pip install "numpy<2"\npip install --no-build-isolation pyTMHMM', language="bash")
