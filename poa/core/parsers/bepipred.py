@@ -107,7 +107,9 @@ def bp2_AntigenEpitopes(dataframe):
             firstpos = pos
         epitope_seq += antigens_DF["AA"][i]
 
-        if i == len(antigens_DF) - 1 or antigens_DF["Position"][i + 1] != pos + 1:
+        if (i == len(antigens_DF) - 1
+                or antigens_DF["antigens"][i + 1] != antigens_DF["antigens"][i]
+                or antigens_DF["Position"][i + 1] != pos + 1):
             results_df = bp2_dfUpdate(antigens_DF, i, firstpos, epitope_seq, results_df, index)
             index += 1
             epitope_seq = ""

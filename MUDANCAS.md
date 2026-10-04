@@ -5,6 +5,10 @@
 **Data:** 17 de agosto de 2026
 **Base de comparação:** commit `62cf8f4` (`main`)
 
+**Revisão de 03/10/2026:** correções adicionais, 155 testes passando e propostas de evolução
+em [`REVISAO.md`](REVISAO.md). Os números abaixo registram a entrega anterior; o PDF também
+é um registro anterior e não foi regenerado nesta revisão.
+
 ---
 
 ## 1. Resumo executivo
@@ -19,7 +23,7 @@ suíte de testes — **sem alterar a lógica científica de ranqueamento e sele�
 | Indicador | Antes (`main`) | Depois (`feature/viz-realdata`) |
 |---|---|---|
 | Organização do código | 13 scripts na raiz | pacote `poa/` em 4 camadas (44 arquivos) |
-| Testes automatizados | nenhum | 121 testes (`pytest`), todos passando |
+| Testes automatizados | nenhum | 143 testes (`pytest`), todos passando |
 | Interface | apenas linha de comando | CLI (inalterada) + GUI Streamlit de 7 etapas |
 | Submissão às ferramentas web | 100% manual | automatizada ou reimplementada, com fallback manual |
 | Análise de conservação | manual no site do IEDB | reimplementação local + upload manual |
@@ -364,7 +368,7 @@ sessão retomada abre os mapas 2D/3D normalmente.
 
 ## 8. Testes
 
-Suíte com **121 testes**, todos passando (`pytest`, configuração em `pytest.ini`):
+Suíte com **143 testes**, todos passando (`pytest`, configuração em `pytest.ini`):
 
 | Arquivo | Cobertura |
 |---|---|

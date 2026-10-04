@@ -1,10 +1,11 @@
 """Parser for arbitrary predictors supplied as a standardized FASTA file.
 
-Logic preserved unchanged from the original ``othersPred.py``.
+Preserves the original length filters and supports wrapped FASTA records.
 """
 from __future__ import annotations
 
 import pandas as pd
+from Bio import SeqIO
 
 
 def fasta_epitopes(fasta, lenght_min, lenght_max):
@@ -17,28 +18,18 @@ def fasta_epitopes(fasta, lenght_min, lenght_max):
     # Create a new DataFrame to store results
     results_df = pd.DataFrame(columns=["Method", "Specie", "Protein", "ID_Sequence", "Initial Position", "Final Position", "Peptide Sequence"])
 
-    # Open and parse the FASTA file
-    with open(fasta, "r") as Input:
-        index = 0
-        for line in Input:
-            if not line.isspace():
-                line = line.upper().strip()
-                if line[0] == ">":  # Extract metadata from the header
-                    ID_data = line.replace(">", "")
-                    ID_data = ID_data.split("_")
-                    sp = ID_data[1]  # Species
-                    prot = ID_data[0]  # Protein
-                    method = ID_data[2]  # Prediction method
-                    idSeq = f"{ID_data[3]}_{ID_data[4]}" if ID_data[3] == "NP" else ID_data[3]  # Sequence ID
-                    InitialPos = ID_data[-2]  # Initial position
-                    FinalPos = ID_data[-1]  # Final position
-                else:  # Extract epitope sequence
-                    Epitope = line
-                    # Add epitope data to the DataFrame
-                    results_df.loc[index] = [
-                        method, sp, prot, idSeq, InitialPos, FinalPos, Epitope
-                    ]
-                    index += 1
+    # A FASTA record may span several lines; line wrapping must not split an epitope.
+    for index, record in enumerate(SeqIO.parse(fasta, "fasta")):
+        fields = record.id.upper().split("_")
+        if len(fields) < 6 or not all(fields):
+            raise ValueError(
+                f"Invalid epitope header '{record.id}'; expected Protein_Specie_Method_ID_Init_Final."
+            )
+        protein, species, method = fields[:3]
+        results_df.loc[index] = [
+            method, species, protein, "_".join(fields[3:-2]),
+            fields[-2], fields[-1], str(record.seq).upper(),
+        ]
 
     # Apply length constraints to epitopes
     if lenght_min == 0 and lenght_max == 0:

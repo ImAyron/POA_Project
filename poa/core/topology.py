@@ -1,7 +1,8 @@
 """Membrane-topology characterization of epitopes via pyTMHMM.
 
 Combines the original ``TMHMM.py`` (pyTMHMM wrapper + per-epitope region math) and
-``PepiTMHMM.py`` (epitope↔protein matching). Scientific logic preserved unchanged.
+``PepiTMHMM.py`` (epitope↔protein matching). Matching uses species, protein and supplied
+coordinates when they agree with the sequence; region-fraction arithmetic is unchanged.
 
 ``pyTMHMM`` is imported lazily inside :func:`pyTMHMMpredict` so this module can be imported
 (for the rest of the pipeline / tests) even when pyTMHMM is not installed.
@@ -120,6 +121,8 @@ def tmhmmAnalysis(args, dataframe):
     dataframe = dataframe.assign(Portion_Outside="-")
     dataframe = dataframe.assign(Portion_TM="-")
     dataframe = dataframe.assign(Portion_Inside="-")
+    if dataframe.empty:
+        return dataframe
 
     # Perform TMHMM prediction on protein sequences
     ids_TMHMM_list, seqs_TMHMM_list = pyTMHMMpredict(args.f)
@@ -160,6 +163,9 @@ def tmhmmAnalysis(args, dataframe):
             # Check if the protein sequence belongs to the same virus as the epitope
             if not sameVirus(EpitopeVirus, seq_polyprot_id):
                 continue
+            protein_fields = seq_polyprot_id.split("_")
+            if len(protein_fields) > 1 and protein_fields[0] != idt[1]:
+                continue
 
             # Ensure the epitope sequence is present in the protein sequence
             if epitope not in seq_polyprot:
@@ -192,7 +198,13 @@ def tmhmmAnalysis(args, dataframe):
             )
 
         seq_polyprot_id, seq_polyprot = matches[0]
-        init = seq_polyprot.find(epitope)
+        init = int(init_pos) - 1
+        if seq_polyprot[init:int(fin_pos)] != epitope:
+            # Legacy files can use coordinates from another reference. Preserve that fallback,
+            # but never silently choose the first repeat when the supplied coordinates match.
+            warnings.warn(f"Epitope {idt_epitope} does not match its stated coordinates; "
+                          "using its first sequence occurrence in the matching protein.")
+            init = seq_polyprot.find(epitope)
         epit_lenght = len(epitope)
         # Calculate the percentage of residues in each membrane topology classification
         Out_portion, TM_portion, Ins_portion = epitTMHMMcaract(annotation_by_id[seq_polyprot_id], init, epit_lenght)

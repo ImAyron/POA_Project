@@ -9,7 +9,7 @@ import json
 import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -445,25 +445,208 @@ def consolidate_sources(sources: Dict[str, List[str]], dest_dir: Path) -> Dict[s
     return files
 
 
+#: residues that are not one of the 20 standard amino acids ('X' is the one POA1 refuses)
+AMBIGUOUS_RESIDUES = frozenset("XBZJUO*")
+
+#: how each POA1 method key is presented in the step-2 preview, and how its file is read
+_SOURCE_KINDS: Dict[str, Tuple[str, str]] = {
+    "b3": ("BepiPred-3.0", "fasta"),
+    "b2": ("BepiPred-2.0", "json"),
+    "p": ("PAP/IMED (antigenicidade)", "text"),
+    "n": ("NetCTL 1.2", "text"),
+    "m": ("MHC-II Binding (IEDB)", "dir"),
+    "x": ("Outros preditores", "fasta"),
+}
+
+
+@dataclass
+class SourcePreview:
+    """
+    What one prediction input holds, read from the file itself — no parser involved.
+
+    Step 2 only collects raw tool output; POA1 (step 3) is what parses it, using filtering
+    parameters that are chosen there. A preview that ran the parsers would therefore have to
+    invent those parameters and could disagree with the real run. This reports what the *file*
+    carries — records, headers, species — which is enough to catch the wrong file or a header
+    convention the pipeline cannot read, without claiming to predict POA1's output.
+    """
+    label: str
+    name: str
+    kind: str
+    size_bytes: int
+    n_records: Optional[int] = None
+    species: List[str] = field(default_factory=list)
+    proteins: List[str] = field(default_factory=list)
+    rows: List[Dict] = field(default_factory=list)
+    head: str = ""
+    notes: List[str] = field(default_factory=list)
+
+
+def summarize_source(path: str, key: str) -> SourcePreview:
+    """Describe one prediction file (see :class:`SourcePreview`); ``key`` is the POA1 method."""
+    label, kind = _SOURCE_KINDS.get(key, (key, "text"))
+    target = Path(path)
+    preview = SourcePreview(label=label, name=target.name, kind=kind,
+                            size_bytes=target.stat().st_size if target.exists() else 0)
+    if not target.exists():
+        preview.notes.append("Arquivo não encontrado.")
+        return preview
+
+    if kind == "dir" or target.is_dir():
+        files = sorted(p for p in target.glob("*.htm*"))
+        preview.kind = "dir"
+        preview.n_records = len(files)
+        preview.size_bytes = sum(p.stat().st_size for p in files)
+        preview.rows = [{"Arquivo": p.name, "Bytes": p.stat().st_size} for p in files]
+        if not files:
+            preview.notes.append("Nenhum .html nesta pasta.")
+        return preview
+
+    if kind == "fasta":
+        records = parse_fasta_headers(str(target))
+        preview.n_records = len(records)
+        preview.species = sorted({r["specie"] for r in records if r["specie"]})
+        preview.proteins = sorted({r["protein"] for r in records if r["protein"]})
+        preview.rows = [{"Cabeçalho": r["header"], "Proteína": r["protein"],
+                         "Espécie": r["specie"], "Resíduos": r["length"]} for r in records]
+        if records and not all(r["ok"] for r in records):
+            preview.notes.append(
+                "Há cabeçalhos sem `_`: nenhuma espécie sai deles. O POA1 agrupa esses epítopos "
+                "sem espécie e a etapa 4 os compara com o conjunto errado.")
+        if not records:
+            preview.notes.append("Nenhum registro FASTA neste arquivo.")
+        return preview
+
+    if kind == "json":
+        try:
+            keys = realdata_import.antigen_keys(str(target))
+            bad = nonconforming_antigen_keys(str(target))
+        except Exception as exc:  # malformed JSON must not take the whole step down
+            preview.notes.append(f"Não foi possível ler o JSON: {exc}")
+            return preview
+        preview.n_records = len(keys)
+        preview.rows = [{"Antígeno": k, "Convenção": "❌" if k in bad else "✅"} for k in keys]
+        preview.species = sorted({str(k).upper().split("_")[1] for k in keys
+                                  if len(str(k).split("_")) > 1})
+        if bad:
+            preview.notes.append(
+                "Antígeno(s) fora da convenção `Proteína_Espécie_ID`: " + ", ".join(map(str, bad))
+                + ". Use o adaptador desta etapa para mapear cada um à sua espécie.")
+        return preview
+
+    text = target.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    preview.n_records = len(lines)
+    preview.head = "\n".join(lines[:15])
+    return preview
+
+
+def summarize_sources(sources: Dict[str, List[str]]) -> List[SourcePreview]:
+    """Describe every collected prediction input, in method order."""
+    return [summarize_source(path, key)
+            for key in sorted(sources) for path in sources[key]]
+
+
+def conservancy_overview(csv_dir) -> pd.DataFrame:
+    """
+    One row per conservancy CSV: epitopes, how many matched, and the identity range.
+
+    Step 4 used to list only file names, so the CSVs it had just produced could not be judged
+    without downloading them. "Com match" counts epitopes with at least one protein match at the
+    threshold the file was computed with — the quantity POA2's ``-m`` filter acts on.
+    """
+    from ..core.parsers import conservancy as cons
+
+    def as_number(series):
+        """Same '80.00%' -> 80.0 reading POA2 applies, so the summary cannot drift from it."""
+        return cons.strip_percent(series)
+
+    rows = []
+    errors = []
+    for path in cons.map_EpConservFiles(str(csv_dir)):
+        try:
+            df = pd.read_csv(path)
+            percent_col = cons.find_percent_column(df.columns)
+            minimum, maximum = as_number(df["Minimum identity"]), as_number(df["Maximum identity"])
+        except (OSError, ValueError, KeyError, pd.errors.ParserError) as exc:
+            errors.append(f"{Path(path).name}: {exc}")
+            continue
+        percent = as_number(df[percent_col].astype(str).str.split(" ").str[0])
+        name = Path(path).name
+        stem = (name[: -len("_conservancy.csv")] if name.endswith("_conservancy.csv")
+                else Path(name).stem)
+        rows.append({
+            "Espécie": stem.upper(),
+            "Arquivo": name,
+            "Epítopos": len(df),
+            "Com match": int((percent > 0).sum()),
+            "Identidade mín. (%)": round(float(minimum.min()), 2) if len(df) else None,
+            "Identidade máx. (%)": round(float(maximum.max()), 2) if len(df) else None,
+        })
+    result = pd.DataFrame(rows)
+    result.attrs["errors"] = errors
+    return result
+
+
+#: PT-BR labels for the language-neutral stage keys of ``conservancy.stage_counts``
+_FUNNEL_LABELS = {
+    "input": lambda v: "Epítopos nos CSVs de conservância",
+    "min_identity": lambda v: f"Identidade mínima ≥ {v}%",
+    "max_identity": lambda v: f"Identidade máxima ≤ {v}%",
+    "seq_match": lambda v: f"Proteínas com match ≥ {v}%",
+    "identity_filter": lambda v: f"Identidade do epítopo {v[0]} {v[1]}%",
+}
+
+
+def conservancy_funnel(csv_dir, params: Dict) -> pd.DataFrame:
+    """
+    Where epitopes are lost along POA2's filters, as an ordered ``Etapa``/``Epítopos`` table.
+
+    POA2 reports only the survivors, so an empty result cannot be told from a too-tight bound.
+    ``params`` is the dict built by step 5 (``t``/``imin``/``imax``/``m``/``idf``/``objective``).
+    """
+    from ..core.parsers import conservancy as cons
+
+    stages = cons.stage_counts(
+        str(csv_dir),
+        ID_threshold=params.get("t", 70),
+        symbol=">=" if params.get("objective", "conserved") == "conserved" else "<",
+        seq_match=params.get("m", 60),
+        max_ID=params.get("imax", 100),
+        min_ID=params.get("imin", 60),
+        identity_filter=params.get("idf", False),
+    )
+    return pd.DataFrame([
+        {"Etapa": _FUNNEL_LABELS[s["stage"]](s["value"]), "Epítopos": s["remaining"]}
+        for s in stages
+    ])
+
+
 def parse_fasta_headers(fasta_path: str) -> List[Dict[str, str]]:
     """
     Show how each ``-f`` header is read under the ``Protein_Specie_ID`` convention.
 
-    Returns one dict per record with ``header``/``protein``/``specie``/``id``/``ok``. ``ok`` is
-    False when the header has no ``_`` separator, so no species can be extracted at all — the
-    case that makes POA1 report every epitope without a species.
+    Returns one dict per record with ``header``/``protein``/``specie``/``id``/``ok``, plus
+    ``length`` and ``ambiguous``. ``ok`` is False when the header has no ``_`` separator, so no
+    species can be extracted at all — the case that makes POA1 report every epitope without a
+    species. ``ambiguous`` lists the non-standard residues present: POA1's integrity check
+    refuses an epitope containing ``X``, so showing it in step 1 explains a later refusal
+    instead of letting it surface three steps on.
     """
     from Bio import SeqIO
 
     rows: List[Dict[str, str]] = []
     for rec in SeqIO.parse(fasta_path, "fasta"):
         parts = str(rec.id).upper().split("_")
+        sequence = str(rec.seq).upper()
         rows.append({
             "header": str(rec.id),
             "protein": parts[0] if parts else "",
             "specie": parts[1] if len(parts) > 1 else "",
             "id": "_".join(parts[2:]) if len(parts) > 2 else "",
             "ok": len(parts) > 1,
+            "length": len(sequence),
+            "ambiguous": "".join(sorted(set(sequence) & AMBIGUOUS_RESIDUES)),
         })
     return rows
 

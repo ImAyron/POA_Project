@@ -12,7 +12,33 @@ verificado no Windows: **POA2 + pyTMHMM**, **EMBOSS antigenic** (substituto do P
 
 ## 0. Pré-requisitos
 
-- Windows com **WSL2 + Ubuntu** (`wsl --install -d Ubuntu` no PowerShell, se ainda não tiver).
+- Windows com **WSL2 + Ubuntu**. Confira o que já existe, no PowerShell:
+  ```powershell
+  wsl -l -v
+  ```
+  Se a lista só tiver `docker-desktop`, você **não tem** uma distro utilizável — essa é interna do
+  Docker Desktop e não serve. Instale o Ubuntu (pede reinício e a criação de um usuário Linux):
+  ```powershell
+  wsl --update                 # ANTES de instalar: imagens recentes do Ubuntu exigem WSL novo
+  wsl --install -d Ubuntu
+  wsl --set-default Ubuntu     # senão 'wsl' sozinho continua abrindo o docker-desktop
+  ```
+
+  > **Duas armadilhas que custam tempo:**
+  >
+  > 1. O `docker-desktop` costuma ficar como distro **padrão**. Aí `wsl` sem argumento abre nele, e
+  >    você recebe `-sh: bash: not found` — é um BusyBox mínimo, sem bash e logado como root. Se o
+  >    prompt terminar em `#` e o shell for `-sh`, você está na distro errada: saia e use
+  >    `wsl -d Ubuntu`.
+  > 2. Uma imagem recente do Ubuntu (26.04) sobre um WSL antigo (ex.: 2.2.4.0, de 2024) registra a
+  >    distro mas ela não inicia, falhando com **`Falha catastrófica` / `Wsl/Service/E_UNEXPECTED`**
+  >    — inclusive com `--user root`. Confira com `wsl --version`; se for antigo, rode
+  >    `wsl --update`, depois `wsl --shutdown` e tente de novo. Se persistir, recadastre a distro
+  >    (ela está vazia, não há o que perder):
+  >    ```powershell
+  >    wsl --unregister Ubuntu
+  >    wsl --install -d Ubuntu
+  >    ```
 - **conda/miniconda dentro da WSL** (não é o conda do Windows). Se não tiver:
   ```bash
   cd ~
@@ -29,19 +55,30 @@ verificado no Windows: **POA2 + pyTMHMM**, **EMBOSS antigenic** (substituto do P
 
 ## 1. Trazer o código para a WSL
 
-Recomendado: **clonar o repositório local (com a branch da automação) para o home da WSL**.
-Evita a lentidão do `/mnt/c`, problemas de fim de linha (CRLF) e o OneDrive.
+Recomendado: **clonar o repositório local para o home da WSL**. Evita a lentidão do `/mnt/c` e
+problemas de fim de linha (CRLF).
 
 ```bash
-git clone -b feature/automation-gui \
-  "/mnt/c/Users/pichau/OneDrive/Desktop/POA/POA_Project" ~/POA_Project
+git clone -b feature/viz-realdata \
+  "/mnt/c/Users/Ayron/Desktop/Reconhecimento de Padrões/POA_Project" ~/POA_Project
 cd ~/POA_Project
 git log --oneline -3
 ```
-`>>> esperado:` os commits `fix(netctl)…`, `docs(readme)…`, etc.
+`>>> esperado:` os commits `feat(gui): one folder per analysis…`,
+`fix(conservancy): make the sequence identity threshold actually filter`, etc.
 
-*(Alternativa, sem copiar: `cd /mnt/c/Users/pichau/OneDrive/Desktop/POA/POA_Project` — funciona,
-mas é mais lento e o `.venv` do Windows fica visível; apenas não o use.)*
+> As aspas são obrigatórias: o caminho tem espaço e acento. Ajuste se o seu projeto estiver em
+> outro lugar — `pwd` no Git Bash do Windows mostra o caminho certo.
+
+**Atenção:** `results/` está no `.gitignore`, então o clone **não** traz as suas análises. Para
+continuar na WSL uma análise começada no Windows, aponte a pasta de resultados para a do Windows:
+
+```bash
+export POA_RESULTS_DIR="/mnt/c/Users/Ayron/Desktop/Reconhecimento de Padrões/POA_Project/results"
+```
+
+Assim você tem a velocidade do clone no `~` e as mesmas análises dos dois lados. A alternativa é
+rodar direto sobre a pasta do Windows (§6.1), sem clonar nada.
 
 ---
 
@@ -55,7 +92,7 @@ conda create -n poa --override-channels -c conda-forge python=3.11 pip -y
 conda activate poa
 
 # dependências Python do pipeline + GUI
-pip install pandas numpy biopython openpyxl pytest requests streamlit plotly
+pip install pandas numpy biopython openpyxl pytest requests streamlit plotly py3Dmol
 
 # EMBOSS (substituto do PAP/IMED) — só existe no Linux, via bioconda
 conda install -n poa --override-channels -c conda-forge -c bioconda emboss -y
@@ -76,7 +113,7 @@ python -c "import pyTMHMM; print('pyTMHMM OK')"
 
 Verifique:
 ```bash
-python -c "import pandas, numpy, Bio, streamlit, plotly, requests; print('py deps OK')"
+python -c "import pandas, numpy, Bio, streamlit, plotly, requests, py3Dmol; print('py deps OK')"
 which antigenic && antigenic -help 2>&1 | head -n 3
 python -c "import pyTMHMM; print('pyTMHMM OK')"
 ```
@@ -92,8 +129,9 @@ python -c "import pyTMHMM; print('pyTMHMM OK')"
 cd ~/POA_Project
 pytest -q
 ```
-`>>> esperado:` `43 passed`. Valida parsers, ranqueamento/filtragem, conservancy local,
-clientes de serviço e o backend da GUI **na sua máquina**.
+`>>> esperado:` `155 passed` nesta revisão, com as dependências da GUI instaladas. Valida parsers,
+ranqueamento/filtragem, conservancy local, clientes de serviço, backend e telas da GUI.
+Os testes de topologia simulam o preditor; a execução real do pyTMHMM é conferida na seção 4.
 
 ---
 
@@ -233,9 +271,13 @@ cd ~/POA_Project
 streamlit run poa/gui/app.py
 ```
 Abra **http://localhost:8501** no navegador do **Windows** (o WSL2 encaminha o localhost).
-Percorra as 6 etapas: envie `proteins.fasta`, automatize/faça upload das predições, rode o POA1
-(veja tabela + gráficos), calcule a Conservancy local, rode o POA2 e baixe os resultados.
-Para parar: `Ctrl+C` no terminal.
+A interface primeiro pede **qual análise** usar — crie uma nova ou reabra uma existente. Depois
+percorra as 7 etapas: envie `proteins.fasta`, automatize/faça upload das predições, rode o POA1
+(veja tabela + gráficos), calcule a Conservancy local, rode o POA2, baixe os resultados e veja os
+mapas 2D/3D. Para parar: `Ctrl+C` no terminal.
+
+Para um conjunto pequeno em que o limiar de identidade comprovadamente muda o resultado, use
+`exemplos/limiar/` — o roteiro está em [`COMO_TESTAR.md`](COMO_TESTAR.md) §4.
 
 ### 6.1 Rodar a GUI diretamente sobre a pasta do Windows
 
@@ -245,16 +287,23 @@ terminada aqui.
 
 ```bash
 conda activate poa
-cd /mnt/c/Users/<você>/OneDrive/Desktop/POA/POA_Project
+cd "/mnt/c/Users/Ayron/Desktop/Reconhecimento de Padrões/POA_Project"
 streamlit run poa/gui/app.py
 ```
 
 **Este é o caminho recomendado para o POA2 no Windows.** `pip install pyTMHMM` não funciona lá:
 não há *wheel* para Windows, o build exige o Microsoft C++ Build Tools e o pacote 1.3.6 não
-compila contra numpy 2.x. Como a sessão do Streamlit não é compartilhada entre processos, a
-**etapa 5 oferece "Retomar com estes arquivos"** quando encontra CSVs de conservância em
-`results/conservancy_csv/` — basta escolher o FASTA de proteínas (`-f`) e seguir, sem repetir as
-etapas 1 a 4.
+compila contra numpy 2.x.
+
+Para retomar do ponto onde parou no Windows: **abra a mesma análise** na tela inicial (ela aparece
+na lista com a data e o progresso). A sessão do Streamlit não é compartilhada entre processos, mas
+os arquivos estão na pasta — quando a etapa 5 encontra os CSVs de conservância daquela análise,
+ela oferece **"Retomar com estes arquivos"**: basta escolher o FASTA de proteínas (`-f`) e seguir,
+sem repetir as etapas 1 a 4.
+
+> Se você clonou o projeto para `~` em vez de rodar sobre `/mnt/c`, exporte o `POA_RESULTS_DIR`
+> apontando para a pasta `results` do Windows (§1) — senão a WSL terá a sua própria `results/` e
+> as análises não se encontram.
 
 ---
 
@@ -281,8 +330,11 @@ etapas 1 a 4.
   O pandas funciona com `numpy>=1.26,<2`.
 - **`ModuleNotFoundError: poa`** → rode a partir da raiz do repo (`cd ~/POA_Project`);
   o `pytest.ini` já define `pythonpath = .`.
-- **Fim de linha / permissão estranhos** → você está em `/mnt/c` (OneDrive). Prefira o clone em
-  `~/POA_Project` (passo 1).
+- **Fim de linha / permissão estranhos** → você está em `/mnt/c`. Prefira o clone em
+  `~/POA_Project` (passo 1), com `POA_RESULTS_DIR` apontando para a `results/` do Windows.
+- **A análise feita no Windows não aparece na lista** → a WSL está usando outra pasta de
+  resultados. Confira com `echo $POA_RESULTS_DIR` e veja o §1; rodando sobre `/mnt/c` (§6.1) a
+  pasta é a mesma automaticamente.
 - **API MHC-II sem resposta** → pode ser instabilidade do IEDB; o cliente levanta
   `ServiceUnavailable` e a GUI oferece o upload manual como plano B.
 
@@ -292,7 +344,7 @@ etapas 1 a 4.
 
 | Passo | Valida |
 |---|---|
-| 3 | Parsers, ranqueamento/filtragem, conservancy local, clientes, backend GUI (43 testes) |
+| 3 | Parsers, ranqueamento/filtragem, conservancy local, clientes, backend e telas da GUI (121 testes) |
 | 4 | Pipeline completo offline: POA1 → Conservancy local → **POA2 + pyTMHMM** |
 | 5.1 | **EMBOSS antigenic** → PAP/IMED → POA1 |
 | 5.2 | **API MHC-II do IEDB** + conferência das colunas do TSV |

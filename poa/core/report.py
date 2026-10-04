@@ -63,6 +63,8 @@ def writereport(dataframe, path):
         Prot_fewerEpit = []
         fewer_Epitopes = (math.inf)
         Total_epitopes = len(dataframe["Peptide Sequence"])
+        if Total_epitopes == 0:
+            greater_Epitopes = fewer_Epitopes = 0
         for organism in organisms:
             df_organism = dataframe.loc[(dataframe["Specie"] == organism)]  # per-species df
             organismProteins = list(df_organism["Protein"].unique())
@@ -106,6 +108,6 @@ def writereport(dataframe, path):
         average_length = 0
         for epitope in dataframe["Peptide Sequence"]:
             average_length += len(epitope)
-        average_length /= Total_epitopes
+        average_length = average_length / Total_epitopes if Total_epitopes else 0
         report.write("#Average length of epitopes:\n")
         report.write(f"{int(average_length)} aa.")

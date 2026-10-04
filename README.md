@@ -23,6 +23,8 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 Extras que não são pacotes pip ou são pesados (instale apenas se quiser aquela automação):
+* **pyTMHMM** (topologia do POA2): instalação separada em Linux/WSL conforme
+  [`TESTING_WSL.md`](TESTING_WSL.md). A instalação básica permite usar a GUI, o POA1 e as prévias.
 * **EMBOSS `antigenic`** (substitui o site PAP/IMED, que saiu do ar; mesmo método Kolaskar–Tongaonkar):
   `conda install -c bioconda emboss` (no Windows: WSL2 + conda, ou Docker).
 * Modelo local do **BepiPred-3.0** (PyTorch + ESM-2): `pip install bp3`.
@@ -66,8 +68,25 @@ proteína/espécie, colorida por método de predição — e visualizador 3D sob
 enviada pelo usuário, com os epítopos destacados (py3Dmol / 3Dmol.js; a renderização 3D requer
 internet, e a numeração de resíduos do PDB precisa corresponder às posições das predições).
 
-**Testes:** `pytest` — 121 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
-de serviço, backend da interface, visualização e o adaptador dos dados reais.
+**Saída visível em cada etapa:** toda etapa mostra o que produziu, não apenas que executou.
+A **etapa 1** lista o comprimento de cada sequência e os resíduos ambíguos (o `X` que o POA1
+recusa). A **etapa 2** mostra o conteúdo de cada arquivo de predição enviado — registros,
+espécies e proteínas lidas dos cabeçalhos, e um aviso quando o cabeçalho não segue
+`Proteína_Espécie_ID`; é o **conteúdo bruto do arquivo**, porque os epítopos em si são extraídos
+pelo POA1 (etapa 3) com os parâmetros de filtragem, e uma prévia que rodasse os parsers antes
+disso poderia discordar da execução real. A **etapa 4** exibe os CSVs de conservância em tabela,
+com epítopos e quantos têm match por espécie. A **etapa 5** traz um **funil dos filtros** —
+quantos epítopos restam após cada um (identidade mínima, máxima, `-m` e, se ligado, o filtro de
+limiar) — de modo que um resultado vazio aponta qual filtro o esvaziou, em vez de só sair vazio.
+O funil é calculado só a partir dos CSVs, então aparece **mesmo sem o pyTMHMM**: no Windows dá
+para ajustar os parâmetros e só então passar para a WSL para executar.
+
+**Testes:** `python -m pytest` — 155 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
+de serviço, backend da interface, visualização e o adaptador dos dados reais. Como preparar o
+ambiente e conferir tudo à mão (inclusive um conjunto de exemplo em `exemplos/limiar/` em que o
+limiar de identidade comprovadamente muda o resultado): **[`COMO_TESTAR.md`](COMO_TESTAR.md)**.
+
+Revisão de código, correções e melhorias propostas: [`REVISAO.md`](REVISAO.md).
 
 > **Corrigido:** o parser do NetCTL 1.2 tinha um bug **pré-existente** (inserção de linhas por índice
 > não sequencial, incompatível com pandas ≥ 2; e lógica de marcador/preenchimento inconsistente com a

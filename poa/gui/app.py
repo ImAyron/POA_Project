@@ -237,10 +237,29 @@ def step_inputs():
     if ss.proteins_path:
         rows = backend.parse_fasta_headers(ss.proteins_path)
         species = backend.species_in_fasta(ss.proteins_path)
-        st.write(f"**{len(rows)} sequência(s)** — veja como cada cabeçalho foi interpretado:")
+        total_aa = sum(r["length"] for r in rows)
+        st.write(f"**{len(rows)} sequência(s)**, {total_aa} resíduos no total — veja como cada "
+                 "cabeçalho foi interpretado e o que cada registro contém:")
         st.dataframe(pd.DataFrame([{"Cabeçalho": r["header"], "Proteína": r["protein"],
-                                    "Espécie": r["specie"], "ID": r["id"]} for r in rows]),
+                                    "Espécie": r["specie"], "ID": r["id"],
+                                    "Resíduos": r["length"],
+                                    "Ambíguos": r["ambiguous"] or "—"} for r in rows]),
                      use_container_width=True, hide_index=True)
+
+        empty = [r["header"] for r in rows if r["length"] == 0]
+        if empty:
+            st.error("Registro(s) sem sequência: " + ", ".join(empty) +
+                     ". Um cabeçalho sem resíduos não serve de referência para a conservância.")
+        with_x = [r["header"] for r in rows if "X" in r["ambiguous"]]
+        if with_x:
+            st.warning("Sequência(s) com o resíduo ambíguo `X`: " + ", ".join(with_x) +
+                       ". O POA1 recusa epítopos que contenham `X` (checagem de integridade do "
+                       "`-f`) — resolva antes de executar a etapa 3.")
+        other_amb = sorted({c for r in rows for c in r["ambiguous"] if c != "X"})
+        if other_amb:
+            st.caption("Outros resíduos não-padrão presentes: " + ", ".join(other_amb) +
+                       " — não bloqueiam o POA1, mas afetam o cálculo de identidade.")
+
         if not all(r["ok"] for r in rows):
             st.error("Há cabeçalhos sem separador `_`, dos quais nenhuma espécie pode ser extraída. "
                      "Use `Proteína_Espécie_ID` (ex.: `NS1_DENV1_ref`).")
@@ -435,6 +454,50 @@ def _manual_upload(label: str, key: str, types, filename: str):
         st.success(f"{label}: {len(ups)} arquivo(s) — " + ", ".join(u.name for u in ups))
 
 
+def _human_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB"):
+        if n < 1024 or unit == "MB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} MB"
+
+
+def _render_source_previews(sources):
+    """
+    Show what each collected prediction file holds, before POA1 ever reads it.
+
+    Step 2 is where a wrong file or an unreadable header convention is cheapest to fix; without
+    this the first sign of either was an empty or mis-grouped table two steps later.
+    """
+    st.subheader("Conteúdo dos arquivos enviados")
+    st.caption("Este é o **conteúdo bruto** de cada arquivo, lido do próprio arquivo. Os epítopos "
+               "em si são extraídos pelo POA1 (etapa 3), com os parâmetros de filtragem da etapa 1 "
+               "— por isso aqui aparece o que o arquivo traz, não o que o POA1 vai selecionar.")
+
+    previews = backend.summarize_sources(sources)
+    all_species = sorted({sp for p in previews for sp in p.species})
+    if all_species:
+        st.info("Espécies encontradas nos arquivos de predição: " + ", ".join(all_species))
+
+    for prev in previews:
+        unit = {"fasta": "registro(s)", "json": "antígeno(s)",
+                "dir": "arquivo(s)", "text": "linha(s)"}[prev.kind]
+        count = "?" if prev.n_records is None else prev.n_records
+        head = f"{prev.label} · `{prev.name}` — {count} {unit} · {_human_bytes(prev.size_bytes)}"
+        with st.expander(head, expanded=len(previews) == 1):
+            if prev.species:
+                st.write("**Espécies:** " + ", ".join(prev.species))
+            if prev.proteins:
+                st.write("**Proteínas:** " + ", ".join(prev.proteins))
+            if prev.rows:
+                st.dataframe(pd.DataFrame(prev.rows), use_container_width=True,
+                             hide_index=True, height=240)
+            if prev.head:
+                st.code(prev.head, language=None)
+            for note in prev.notes:
+                st.warning(note)
+
+
 def step_predictions():
     st.header("2 · Predições de epítopos")
     if not ss.proteins_path:
@@ -492,11 +555,13 @@ def step_predictions():
 
     st.divider()
     sources = _collect_sources()
-    if sources:
-        st.success("Métodos prontos: " +
-                   ", ".join(f"{k} ({len(v)} arquivo(s))" for k, v in sorted(sources.items())))
-    else:
+    if not sources:
         st.warning("Nenhum resultado de predição ainda.")
+        return
+
+    st.success("Métodos prontos: " +
+               ", ".join(f"{k} ({len(v)} arquivo(s))" for k, v in sorted(sources.items())))
+    _render_source_previews(sources)
 
 
 # =========================================================================== STEP 3
@@ -709,13 +774,39 @@ def step_conservancy():
         if list(ctx.conservancy_csv_dir.glob("*.csv")):
             _declare_uploaded_threshold()
 
-    csvs = list(ctx.conservancy_csv_dir.glob("*.csv"))
+    csvs = sorted(ctx.conservancy_csv_dir.glob("*.csv"))
     if csvs:
-        st.info("CSVs disponíveis: " + ", ".join(c.name for c in csvs))
+        st.divider()
+        st.subheader("Resultado da conservância")
+        overview = backend.conservancy_overview(ctx.conservancy_csv_dir)
+        for error in overview.attrs.get("errors", []):
+            st.warning(f"Não foi possível resumir o CSV: {error}")
+        if not overview.empty:
+            st.dataframe(overview, use_container_width=True, hide_index=True)
+            st.caption("**Com match** = epítopos com ao menos uma proteína casando no limiar com "
+                       "que o arquivo foi gerado. É sobre essa coluna que o filtro `-m` do POA2 "
+                       "age na etapa 5.")
+            silent = overview[overview["Com match"] == 0]["Espécie"].tolist()
+            if silent:
+                st.warning("Espécie(s) sem nenhum epítopo com match: " + ", ".join(silent) +
+                           ". Elas serão excluídas se o filtro de proteínas com match (-m) for maior que zero.")
+            st.plotly_chart(
+                px.bar(overview.melt(id_vars="Espécie", value_vars=["Epítopos", "Com match"],
+                                     var_name="Medida", value_name="count"),
+                       x="Espécie", y="count", color="Medida", barmode="group",
+                       title="Epítopos por espécie e quantos têm match"),
+                use_container_width=True)
+
+        for c in csvs:
+            with st.expander(f"📄 {c.name}"):
+                try:
+                    st.dataframe(pd.read_csv(c), use_container_width=True, height=300)
+                except (OSError, ValueError, pd.errors.ParserError) as exc:
+                    st.warning(f"Não foi possível ler {c.name}: {exc}")
+                _download(c, f"⬇️ {c.name}", "text/csv")
+
         st.caption("Gravados em:")
         st.code(str(ctx.conservancy_csv_dir), language=None)
-        for c in csvs:
-            _download(c, f"⬇️ {c.name}", "text/csv")
 
 
 # =========================================================================== STEP 5
@@ -776,23 +867,10 @@ def step_poa2():
     if not ss.proteins_path:
         st.warning("O POA2 precisa do FASTA de proteínas (-f) — volte à etapa 1.")
         return
-    if not tmhmm_client.is_available():
-        st.error("**pyTMHMM não está instalado neste ambiente** — sem ele o POA2 não roda.")
-        if sys.platform == "win32":
-            st.warning(
-                "No Windows, `pip install pyTMHMM` **não funciona**: não existe *wheel* para "
-                "Windows, o build precisa do Microsoft C++ Build Tools e o pacote (1.3.6) não "
-                "compila contra numpy 2.x (usa `np.int_t`). Rode a interface pela **WSL**, onde o "
-                "ambiente já está pronto — veja `TESTING_WSL.md`:")
-            st.code("wsl\nconda activate poa\ncd /mnt/c/Users/<você>/…/POA_Project\n"
-                    "streamlit run poa/gui/app.py", language="bash")
-            st.caption("Abra `http://localhost:8501` no navegador do Windows e **reabra esta mesma "
-                       "análise** — a pasta `results/` é a mesma nos dois lados, então tudo o que "
-                       "você já gerou continua valendo; basta ir direto para a etapa 5.")
-        else:
-            st.info("Instale no ambiente atual (precisa de compilador C e `numpy<2`):")
-            st.code('pip install "numpy<2"\npip install --no-build-isolation pyTMHMM', language="bash")
-        return
+    # pyTMHMM gates only the *run*, not the step: everything below except the TMHMM pass is read
+    # from the conservancy CSVs, so on Windows (where pyTMHMM does not build) the parameters and
+    # their effect can still be tuned here before switching to the WSL side to execute.
+    tmhmm_ok = tmhmm_client.is_available()
 
     # The threshold POA2 applies comes from the data, not from the form: it used to only rename a
     # column, so a run could report "conservados ≥70%" while filtering CSVs computed at ≤100%.
@@ -849,9 +927,54 @@ def step_poa2():
                  "critério, ou escolha o objetivo correspondente. Filtrar com um critério e "
                  "rotular o resultado com outro é exatamente o que esta checagem impede.")
 
-    if st.button("▶️ Executar POA2", type="primary", disabled=mismatch):
-        params = dict(objective=objective, t=t_value, imin=imin, imax=imax, m=mmatch, rf=rf,
-                      idf=identity_filter)
+    params = dict(objective=objective, t=t_value, imin=imin, imax=imax, m=mmatch, rf=rf,
+                  idf=identity_filter)
+
+    # Where the epitopes are lost, computed from the CSVs with the parameters currently on screen.
+    # POA2 only ever reported the survivors, so an empty result could not be told from a bound set
+    # too tight — and this answers it before paying for a TMHMM run.
+    funnel = backend.conservancy_funnel(ctx.conservancy_csv_dir, params)
+    if funnel.empty:
+        st.warning("Não foi possível calcular o efeito dos filtros. Confira os cabeçalhos e o "
+                   "conteúdo dos CSVs na etapa 4; todos devem usar o mesmo limiar de identidade.")
+    if not funnel.empty:
+        st.subheader("Efeito dos filtros de conservância")
+        kept, total = int(funnel["Epítopos"].iloc[-1]), int(funnel["Epítopos"].iloc[0])
+        c1, c2 = st.columns([2, 3])
+        with c1:
+            st.dataframe(funnel, use_container_width=True, hide_index=True)
+            st.metric("Epítopos que seguem para a topologia", f"{kept} de {total}")
+        with c2:
+            st.plotly_chart(px.bar(funnel, x="Epítopos", y="Etapa", orientation="h",
+                                   title="Epítopos restantes após cada filtro"),
+                            use_container_width=True)
+        st.caption("Calculado a partir dos CSVs da etapa 4 com os parâmetros acima — ainda sem "
+                   "rodar o TMHMM. A etapa seguinte do POA2 é a topologia de membrana, que não "
+                   "descarta epítopos: apenas acrescenta as colunas `Portion_*`.")
+        if kept == 0:
+            st.error("Nenhum epítopo sobrevive a estes filtros — o POA2 vai produzir uma planilha "
+                     "vazia. Afrouxe o filtro indicado acima como responsável pela queda.")
+
+    if not tmhmm_ok:
+        st.error("**pyTMHMM não está instalado neste ambiente** — sem ele o POA2 não roda. "
+                 "Os parâmetros e o efeito deles acima continuam valendo: ajuste-os aqui e "
+                 "execute do outro lado.")
+        if sys.platform == "win32":
+            st.warning(
+                "No Windows, `pip install pyTMHMM` **não funciona**: não existe *wheel* para "
+                "Windows, o build precisa do Microsoft C++ Build Tools e o pacote (1.3.6) não "
+                "compila contra numpy 2.x (usa `np.int_t`). Rode a interface pela **WSL**, onde o "
+                "ambiente já está pronto — veja `TESTING_WSL.md`:")
+            st.code("wsl\nconda activate poa\ncd /mnt/c/Users/<você>/…/POA_Project\n"
+                    "streamlit run poa/gui/app.py", language="bash")
+            st.caption("Abra `http://localhost:8501` no navegador do Windows e **reabra esta mesma "
+                       "análise** — a pasta `results/` é a mesma nos dois lados, então tudo o que "
+                       "você já gerou continua valendo; basta ir direto para a etapa 5.")
+        else:
+            st.info("Instale no ambiente atual (precisa de compilador C e `numpy<2`):")
+            st.code('pip install "numpy<2"\npip install --no-build-isolation pyTMHMM', language="bash")
+
+    if st.button("▶️ Executar POA2", type="primary", disabled=mismatch or not tmhmm_ok):
         with st.status("Executando POA2 (conservância + TMHMM)…", expanded=True) as status:
             try:
                 ss.poa2_result = backend.run_poa2(ctx, params, ss.proteins_path)
@@ -859,6 +982,15 @@ def step_poa2():
             except Exception as exc:
                 status.update(label="POA2 falhou.", state="error")
                 st.exception(exc)
+
+    if ss.poa2_result is not None:
+        st.divider()
+        st.subheader("Saída do POA2")
+        result = ss.poa2_result.results
+        st.write(f"**{len(result)} epítopo(s) selecionado(s).** Critério aplicado: "
+                 f"`{ss.poa2_result.type_symbol}`.")
+        st.dataframe(result, use_container_width=True, height=300)
+        st.caption("Os downloads e o resumo por topologia estão na etapa 6.")
 
 
 # =========================================================================== STEP 6

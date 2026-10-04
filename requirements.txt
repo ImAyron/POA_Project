@@ -19,7 +19,8 @@ pandas>=1.4          # epitope matrices, filtering, xlsx export
 numpy>=1.21          # numeric support for the BepiPred JSON parser
 biopython>=1.79      # SeqIO — FASTA parsing throughout the pipeline
 openpyxl>=3.0        # engine behind pandas.DataFrame.to_excel (was an implicit dependency)
-pyTMHMM              # transmembrane-helix topology in POA2 (membrane localization of epitopes)
+# pyTMHMM is installed separately for POA2 topology; see TESTING_WSL.md section 2.
+# Keeping it optional lets the GUI, POA1 and CSV previews install without a native compiler.
 
 # --- external-service integration (new) ---
 requests>=2.28       # HTTP client for the IEDB MHC-II REST API

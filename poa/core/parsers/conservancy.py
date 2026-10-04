@@ -19,7 +19,7 @@ import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -280,12 +280,12 @@ def map_EpConservFiles(directory):
         for file in files:
             path_file = os.path.join(folders, file)
             path_file = str(path_file)
-            if ".csv" in file:
+            if file.lower().endswith(".csv"):
                 EpConservFiles.append(path_file)
-    return EpConservFiles
+    return sorted(EpConservFiles)
 
 
-def _strip_percent(series: pd.Series) -> pd.Series:
+def strip_percent(series: pd.Series) -> pd.Series:
     """``'80.00%' -> 80.0``; non-numeric and missing cells become NaN instead of raising."""
     text = series.astype(str).str.strip().str.rstrip("%").str.strip()
     return pd.to_numeric(text, errors="coerce")
@@ -334,8 +334,8 @@ def EpitConservAnalysis(ID_threshold, symbol, seq_match, max_ID, min_ID, directo
     allSp_ConservDF[percent_col] = (
         allSp_ConservDF[percent_col].astype(str).str.replace("%", "", regex=False)
     )
-    allSp_ConservDF["Minimum identity"] = _strip_percent(allSp_ConservDF["Minimum identity"])
-    allSp_ConservDF["Maximum identity"] = _strip_percent(allSp_ConservDF["Maximum identity"])
+    allSp_ConservDF["Minimum identity"] = strip_percent(allSp_ConservDF["Minimum identity"])
+    allSp_ConservDF["Maximum identity"] = strip_percent(allSp_ConservDF["Maximum identity"])
 
     # Apply filters based on minimum and maximum identity thresholds
     allSp_ConservDF_idMin = allSp_ConservDF[allSp_ConservDF["Minimum identity"] >= min_ID]
@@ -372,6 +372,64 @@ def EpitConservAnalysis(ID_threshold, symbol, seq_match, max_ID, min_ID, directo
     ]]
 
     return final_Conserv_df
+
+
+def stage_counts(directory, ID_threshold=70, symbol=">=", seq_match=0, max_ID=100, min_ID=0,
+                 identity_filter=False) -> List[Dict]:
+    """
+    How many epitopes survive each filter of :func:`EpitConservAnalysis`, in order.
+
+    POA2 reports only what came through every filter, so a run that selects nothing looks the
+    same whether the identity bounds were too tight or no epitope reached ``-m``. This reapplies
+    the same steps cumulatively and counts what is left after each one.
+
+    This mirrors the filter chain in :func:`EpitConservAnalysis` and the two must stay in step —
+    ``tests/test_step_outputs.py`` asserts the final count equals ``len(EpitConservAnalysis(...))``
+    for the same arguments, so a change to one that is not made to the other fails there.
+
+    Returns one dict per stage — ``{'stage', 'value', 'remaining'}``, where ``stage`` is a
+    language-neutral key for the caller to label — or ``[]`` when the directory holds no CSV, or
+    CSVs this cannot read. Unlike :func:`EpitConservAnalysis` it neither raises on a threshold
+    mismatch nor on an unreadable header: it describes the data rather than deciding anything
+    with it, and a description that cannot be produced must not stop the run it describes.
+    """
+    files = map_EpConservFiles(directory)
+    if not files:
+        return []
+
+    try:
+        df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+        df = df.drop_duplicates(ignore_index=True)
+        percent_col = find_percent_column(df.columns)
+    except (OSError, ValueError, KeyError, pd.errors.ParserError):
+        return []
+    if not {"Minimum identity", "Maximum identity"} <= set(df.columns):
+        return []
+    df["Minimum identity"] = strip_percent(df["Minimum identity"])
+    df["Maximum identity"] = strip_percent(df["Maximum identity"])
+
+    stages = [{"stage": "input", "value": None, "remaining": len(df)}]
+
+    df = df[df["Minimum identity"] >= min_ID]
+    stages.append({"stage": "min_identity", "value": min_ID, "remaining": len(df)})
+
+    df = df[df["Maximum identity"] <= max_ID].copy()
+    stages.append({"stage": "max_identity", "value": max_ID, "remaining": len(df)})
+
+    # The percent column reads '100.00% (1/1)'; only the leading number is the match percentage.
+    if not df.empty:
+        percent = df[percent_col].astype(str).str.replace("%", "", regex=False)
+        df["Percent"] = pd.to_numeric(percent.str.split(" ", n=1, expand=True)[0], errors="coerce")
+        df = df[df["Percent"] >= seq_match]
+    stages.append({"stage": "seq_match", "value": seq_match, "remaining": len(df)})
+
+    if identity_filter:
+        if not df.empty:
+            df = _apply_identity_filter(df, ID_threshold, symbol)
+        stages.append({"stage": "identity_filter", "value": (symbol, ID_threshold),
+                       "remaining": len(df)})
+
+    return stages
 
 
 def _apply_identity_filter(dataframe: pd.DataFrame, ID_threshold, symbol) -> pd.DataFrame:
