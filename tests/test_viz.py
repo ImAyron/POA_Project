@@ -1,6 +1,7 @@
 """Tests for the GUI visualization helpers (2D epitope map + 3D viewer HTML)."""
 import pandas as pd
 import plotly.graph_objects as go
+import pytest
 
 from poa.gui import viz
 
@@ -48,3 +49,26 @@ def test_build_3dmol_view_html():
     html = viz.build_3dmol_view_html(pdb, [(1, 2)], base_style="cartoon")
     assert isinstance(html, str) and len(html) > 100
     assert "3dmol" in html.lower() or "viewer" in html.lower()
+
+
+def test_missing_py3dmol_explains_how_to_install_it(monkeypatch):
+    """
+    The 3D viewer's dependency is imported lazily, so it fails at render time.
+
+    A bare ImportError reached the user as "No module named 'py3Dmol'", which says nothing about
+    what to do or that only step 7 is affected. The import stays deferred — the rest of the GUI,
+    the CLI and these tests run without py3Dmol — so the message is where the fix has to be.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def without_py3dmol(name, *args, **kwargs):
+        if name == "py3Dmol":
+            raise ImportError("No module named 'py3Dmol'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_py3dmol)
+
+    with pytest.raises(RuntimeError, match="pip install py3Dmol"):
+        viz.build_3dmol_view_html("ATOM\nEND\n", [(1, 2)])
