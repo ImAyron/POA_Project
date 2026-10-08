@@ -56,6 +56,27 @@ porque nenhum abria dois arquivos diferentes.
   colapsados em um.
 - Asserção de que as tags têm quatro caracteres: restrição cosmética sem efeito real.
 
+## Limpeza do terminal (após o primeiro teste manual no Linux)
+
+| Problema | Correção |
+|---|---|
+| APIs depreciadas do Streamlit imprimiam um bloco "Please replace ..." a **cada reexecução** — dezenas de linhas por execução, mais saída que a própria análise | 17 `use_container_width=True` → `width="stretch"`; `components.html` → `_embed_html()`, que resolve `st.iframe` por atributo e cai no antigo quando não existe |
+| `gio: http://localhost:8501: Operation not supported` a cada inicialização na WSL, da tentativa de abrir o navegador | `.streamlit/config.toml` versionado com `headless = true`, mais `logger.level = "warning"` e `gatherUsageStats = false` |
+| `poa.topology` imprimia um banner e uma linha por sequência de referência em INFO, sem a gramática e competindo com o resultado da etapa | Banner removido (a fronteira `POA2/topology` já anuncia a etapa) e o detalhe por sequência passou a `DATA` em DEBUG |
+| As linhas do próprio `logging_conf` não seguiam a gramática que ele define | `NOTE logging \| log file: ...` e `WARN logging \| ...` |
+| `requirements.txt` pedia `streamlit>=1.30`, que não tem o parâmetro `width` que o código agora usa | Piso em `>=1.50`; os docs do Streamlit descrevem o parâmetro mas não dizem em que versão entrou, então é o lado conservador da onda de depreciação, não a versão exata |
+
+Dois testes novos impedem o retorno: um falha se qualquer API depreciada reaparecer no `app.py`,
+outro confere as três chaves do `config.toml`.
+
+### Lacuna conhecida, deliberadamente não mexida
+
+`poa/core/topology.py` usa `warnings.warn()` em quatro pontos para avisar sobre epítopos que não
+casaram com nenhuma proteína ou que casaram com várias. Isso sai no formato do `warnings` do Python,
+em stderr, e **não chega ao `poa.log`** — o registro da execução fica incompleto justamente nos
+casos que mais importam. Converter para `logger.warning` quebraria `tests/test_topology.py`, que
+depende de `pytest.warns(UserWarning)`, então é mudança de contrato e não cabia nesta limpeza.
+
 ## Verificado e correto (sem alteração)
 
 Três pontos examinados em profundidade que **não** eram defeitos:

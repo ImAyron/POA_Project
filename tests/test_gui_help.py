@@ -51,6 +51,42 @@ def test_no_help_text_is_orphaned():
     assert not (set(HELP) - referenced)
 
 
+def test_no_deprecated_streamlit_argument_is_used():
+    """
+    Deprecated Streamlit APIs warn on *every* rerun, which buries the pipeline's own log.
+
+    One ``use_container_width`` in a step that reruns on each interaction produced dozens of
+    "Please replace ..." blocks per run — more terminal output than the analysis itself. ``width``
+    takes "stretch" where the old flag was True and "content" where it was False.
+    """
+    deprecated = {
+        "use_container_width": 'width="stretch"',
+        "components.html(": "_embed_html(), which resolves st.iframe when available",
+    }
+    offenders = {old: new for old, new in deprecated.items() if old in SOURCE}
+
+    assert not offenders, f"APIs depreciadas em uso: {offenders}"
+
+
+def test_streamlit_config_keeps_the_terminal_for_our_own_log():
+    """
+    The committed config is what keeps a run's output readable on a fresh clone.
+
+    ``headless`` stops the browser-open attempt that printed a gio error under WSL, and the logger
+    level drops Streamlit's startup chatter so the STEP/DONE lines are what is left.
+    """
+    import tomllib
+
+    config = Path(__file__).resolve().parents[1] / ".streamlit" / "config.toml"
+    assert config.is_file(), "falta .streamlit/config.toml"
+    with config.open("rb") as fh:
+        settings = tomllib.load(fh)
+
+    assert settings["server"]["headless"] is True
+    assert settings["logger"]["level"] == "warning"
+    assert settings["browser"]["gatherUsageStats"] is False
+
+
 def test_install_guides_cover_every_required_package():
     """
     The hand-written install lists must not drift from ``requirements.txt``.

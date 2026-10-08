@@ -17,6 +17,19 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
+
+
+def _embed_html(html: str, height: int) -> None:
+    """
+    Show self-rendering HTML (the 3D viewer) without the deprecation notice.
+
+    Streamlit renamed this to ``st.iframe`` and now warns on *every* rerun of a page that still
+    calls ``components.html``, which drowned the pipeline's own log. Resolved by attribute rather
+    than by version: the attribute is the fact, and the fallback keeps the viewer working on the
+    Streamlit floor declared in ``requirements.txt`` instead of forcing it up for one call.
+    """
+    render = getattr(st, "iframe", None) or components.html
+    render(html, height=height)
 from Bio import SeqIO
 
 from poa.core.parsers import conservancy as conservancy_parser
@@ -192,13 +205,13 @@ def _select_run() -> backend.WorkContext:
             st.success(f"**{path.name or root.name}**")
             c_switch, c_new = st.columns(2)
             with c_switch:
-                if st.button("Trocar de análise", use_container_width=True,
+                if st.button("Trocar de análise", width="stretch",
                              help="Abrir outra análise já gravada, mantendo os parâmetros de "
                                   "filtragem desta."):
                     ss.run_path = None
                     st.rerun()
             with c_new:
-                if st.button("🆕 Nova análise", type="primary", use_container_width=True,
+                if st.button("🆕 Nova análise", type="primary", width="stretch",
                              help="Limpa todos os campos e resultados e cria uma pasta nova. "
                                   "A análise atual continua gravada em results/."):
                     _full_reset()
@@ -319,7 +332,7 @@ def step_inputs():
                                     "Espécie": r["specie"], "ID": r["id"],
                                     "Resíduos": r["length"],
                                     "Ambíguos": r["ambiguous"] or "—"} for r in rows]),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
 
         empty = [r["header"] for r in rows if r["length"] == 0]
         if empty:
@@ -582,7 +595,7 @@ def _render_source_previews(sources):
             if prev.proteins:
                 st.write("**Proteínas:** " + ", ".join(prev.proteins))
             if prev.rows:
-                st.dataframe(pd.DataFrame(prev.rows), use_container_width=True,
+                st.dataframe(pd.DataFrame(prev.rows), width="stretch",
                              hide_index=True, height=240)
             if prev.head:
                 st.code(prev.head, language=None)
@@ -714,18 +727,18 @@ def step_poa1():
                        "nome da proteína, marque a caixa de inversão `Espécie_Proteína`.")
 
         st.subheader("Epítopos consolidados")
-        st.dataframe(df, use_container_width=True, height=320)
+        st.dataframe(df, width="stretch", height=320)
 
         summ = backend.predictions_summary(df)
         c1, c2 = st.columns(2)
         with c1:
             st.plotly_chart(px.bar(summ["by_method"], x="Method", y="count",
-                                   title="Epítopos por método"), use_container_width=True)
+                                   title="Epítopos por método"), width="stretch")
         with c2:
             st.plotly_chart(px.bar(summ["by_species"], x="Specie", y="count",
-                                   title="Epítopos por espécie"), use_container_width=True)
+                                   title="Epítopos por espécie"), width="stretch")
         st.plotly_chart(px.bar(summ["length_hist"], x="length", y="count",
-                               title="Distribuição de comprimento dos epítopos"), use_container_width=True)
+                               title="Distribuição de comprimento dos epítopos"), width="stretch")
 
         report = Path(ss.poa1_result.report_path)
         if report.exists():
@@ -887,7 +900,7 @@ def step_conservancy():
         for error in overview.attrs.get("errors", []):
             st.warning(f"Não foi possível resumir o CSV: {error}")
         if not overview.empty:
-            st.dataframe(overview, use_container_width=True, hide_index=True)
+            st.dataframe(overview, width="stretch", hide_index=True)
             st.caption("**Com match** = epítopos com ao menos uma proteína casando no limiar com "
                        "que o arquivo foi gerado. É sobre essa coluna que o filtro `-m` do POA2 "
                        "age na etapa 5.")
@@ -900,12 +913,12 @@ def step_conservancy():
                                      var_name="Medida", value_name="count"),
                        x="Espécie", y="count", color="Medida", barmode="group",
                        title="Epítopos por espécie e quantos têm match"),
-                use_container_width=True)
+                width="stretch")
 
         for c in csvs:
             with st.expander(f"📄 {c.name}"):
                 try:
-                    st.dataframe(pd.read_csv(c), use_container_width=True, height=300)
+                    st.dataframe(pd.read_csv(c), width="stretch", height=300)
                 except (OSError, ValueError, pd.errors.ParserError) as exc:
                     st.warning(f"Não foi possível ler {c.name}: {exc}")
                 _download(c, f"⬇️ {c.name}", "text/csv")
@@ -1090,12 +1103,12 @@ def step_poa2():
         kept, total = int(funnel["Epítopos"].iloc[-1]), int(funnel["Epítopos"].iloc[0])
         c1, c2 = st.columns([2, 3])
         with c1:
-            st.dataframe(funnel, use_container_width=True, hide_index=True)
+            st.dataframe(funnel, width="stretch", hide_index=True)
             st.metric("Epítopos que seguem para a topologia", f"{kept} de {total}")
         with c2:
             st.plotly_chart(px.bar(funnel, x="Epítopos", y="Etapa", orientation="h",
                                    title="Epítopos restantes após cada filtro"),
-                            use_container_width=True)
+                            width="stretch")
         st.caption("Calculado a partir dos CSVs da etapa 4 com os parâmetros acima — ainda sem "
                    "rodar o TMHMM. A etapa seguinte do POA2 é a topologia de membrana, que não "
                    "descarta epítopos: apenas acrescenta as colunas `Portion_*`.")
@@ -1149,7 +1162,7 @@ def step_poa2():
         result = ss.poa2_result.results
         st.write(f"**{len(result)} epítopo(s) selecionado(s).** Critério aplicado: "
                  f"`{ss.poa2_result.type_symbol}`.")
-        st.dataframe(result, use_container_width=True, height=300)
+        st.dataframe(result, width="stretch", height=300)
         st.caption("Os downloads e o resumo por topologia estão na etapa 6.")
 
 
@@ -1167,13 +1180,13 @@ def step_results():
     if ss.poa2_result is not None:
         df = ss.poa2_result.results
         st.subheader("Epítopos selecionados (POA2)")
-        st.dataframe(df, use_container_width=True, height=320)
+        st.dataframe(df, width="stretch", height=320)
 
         topo = backend.topology_summary(df)
         if not topo.empty:
             st.plotly_chart(px.bar(topo, x="region", y="mean_fraction",
                                    title="Fração média por topologia de membrana"),
-                            use_container_width=True)
+                            width="stretch")
         st.subheader("Downloads")
         _download(Path(ss.poa2_result.xlsx_path), "⬇️ Planilha POA2 (.xlsx)",
                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -1199,7 +1212,7 @@ def step_viz():
     st.subheader("Mapa 2D de epítopos")
     st.caption("Cada segmento é um epítopo ao longo da sequência; uma trilha por proteína/espécie, "
                "colorido por método.")
-    st.plotly_chart(viz.epitope_map_figure(df), use_container_width=True)
+    st.plotly_chart(viz.epitope_map_figure(df), width="stretch")
 
     # --- 3D structure viewer (upload a PDB) ---
     st.subheader("Estrutura 3D (envie um PDB)")
@@ -1249,7 +1262,7 @@ def step_viz():
                 base_style=base_style,
                 show_surface=surface,
             )
-            components.html(html, height=520)
+            _embed_html(html, height=520)
             st.caption(f"{len(ranges)} epítopo(s) de {prot}_{spec} destacado(s) em vermelho "
                        f"(estrutura: `{Path(ss.pdb_path).name}`). Atenção: a numeração de resíduo "
                        "do PDB precisa corresponder à posição na sequência usada nas predições "

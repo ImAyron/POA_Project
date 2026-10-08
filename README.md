@@ -211,6 +211,13 @@ As tags são ASCII de propósito: um console do Windows em página de código le
 `UnicodeEncodeError` com caracteres fora do ASCII, e uma falha dentro do log é uma falha na
 execução.
 
+O terminal é reservado para esse log. O `.streamlit/config.toml` versionado desliga o conversinha
+de inicialização do Streamlit (`logger.level = "warning"`), a coleta de estatísticas de uso — este
+pipeline lida com sequências de pesquisa não publicadas — e a tentativa de abrir o navegador
+(`headless = true`), que na WSL só produzia `gio: ... Operation not supported`. Abra
+`http://localhost:8501` você mesmo; se roda nativamente e prefere a abertura automática, mude
+`headless` para `false`.
+
 Antes, uma etapa que falhava **não deixava nenhuma linha** — na interface o traceback ia para a
 página do Streamlit e o terminal ficava em branco.
 

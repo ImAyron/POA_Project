@@ -110,7 +110,8 @@ def use_log_file(path: str) -> Optional[logging.Handler]:
         os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
         handler = logging.FileHandler(key, encoding="utf-8")
     except OSError as exc:
-        logger.warning("Could not open the log file %s: %s. Logging to the console only.", path, exc)
+        logger.warning("%s logging | could not open the log file %s: %s. Console only.",
+                       TAG_WARN, path, exc)
         return None
     handler.setFormatter(logging.Formatter(_FILE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
     handler.setLevel(logging.DEBUG)
@@ -123,7 +124,7 @@ def use_log_file(path: str) -> Optional[logging.Handler]:
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     _FILE_HANDLERS[key] = handler
-    logger.info("Log file: %s", key)
+    logger.info("%s logging | log file: %s", TAG_NOTE, key)
     return handler
 
 
