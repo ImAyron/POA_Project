@@ -17,11 +17,25 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
+
+
+def _embed_html(html: str, height: int) -> None:
+    """
+    Show self-rendering HTML (the 3D viewer) without the deprecation notice.
+
+    Streamlit renamed this to ``st.iframe`` and now warns on *every* rerun of a page that still
+    calls ``components.html``, which drowned the pipeline's own log. Resolved by attribute rather
+    than by version: the attribute is the fact, and the fallback keeps the viewer working on the
+    Streamlit floor declared in ``requirements.txt`` instead of forcing it up for one call.
+    """
+    render = getattr(st, "iframe", None) or components.html
+    render(html, height=height)
 from Bio import SeqIO
 
 from poa.core.parsers import conservancy as conservancy_parser
 from poa.gui import backend, viz
-from poa.logging_conf import setup_logging
+from poa.gui.help_texts import HELP
+from poa.logging_conf import use_log_file, setup_logging
 from poa.services import (
     antigenic_client,
     bepipred_client,
@@ -36,10 +50,38 @@ st.set_page_config(page_title="POA — Pipeline de Otimização de Antígenos", 
 
 
 # --------------------------------------------------------------------------- session state
+# STATE POLICY — why every input below is mirrored into session state
+#
+# Streamlit reruns this script on every interaction and renders only the step selected in the
+# sidebar. A widget that is not rendered in a rerun loses its state, so a value typed on one step
+# is gone by the time the user navigates away and back: the widget is recreated from its own
+# default. That silently reverted the POA2 filters to 60/100/60 whenever the user left step 5 to
+# check something on step 4 — and step 5's parameters are the scientific ones.
+#
+# The rule, applied to EVERY input in this module:
+#
+#   1. The value of record lives in session state under a plain, non-widget key (``ss.threshold``,
+#      ``ss.params_poa1``, ``ss.params_poa2``, …). Plain keys are never cleaned up by Streamlit.
+#   2. The widget reads that key as its default and the result is written straight back, so the
+#      key is always what the form currently shows.
+#   3. When a widget needs its own ``key=``, it gets a *different* name than the key of record
+#      (``key="ref_swap_cb"`` next to ``ss.ref_swap``). Assigning to a widget's own key raises in
+#      Streamlit, and widget keys are the ones that get discarded.
+#   4. Grouped parameters are kept as one dict per step, so a step's form is one unit of state.
+#
+# Scope of a reset, from narrowest to widest:
+#
+#   * switching analyses (``_adopt_run``) drops ``_ANALYSIS_KEYS`` — paths and results, which point
+#     into the previous folder. Filter parameters deliberately survive, because the usual reason to
+#     open a second analysis is to run the same parameters over other data.
+#   * "Nova análise" (``_full_reset``) drops *everything*, widget keys included, and unbinds the
+#     folder so a new one is created. That is the only path that clears the forms.
+
 #: session keys holding data that belongs to one analysis — cleared when switching analyses,
 #: so a new run never inherits the previous one's file paths or results
 _ANALYSIS_KEYS = ("proteins_path", "ref_raw", "ref_uploads", "poa1_sources", "prepared_b2",
-                  "poa1_result", "conservancy_ready", "comparison_sets", "poa2_result")
+                  "poa1_result", "conservancy_ready", "comparison_sets", "poa2_result",
+                  "poa2_ran_with", "pdb_path")
 
 
 def _init_state():
@@ -50,6 +92,13 @@ def _init_state():
     ss.setdefault("ref_swap", False)       # source headers are Specie_Protein -> swap them
     ss.setdefault("ref_uploads", [])       # the same files after optional header normalisation
     ss.setdefault("params_poa1", {})
+    # step 5's filter form; see STATE POLICY above. Kept as one dict so leaving step 5 and coming
+    # back restores the whole form, not a subset of it.
+    ss.setdefault("params_poa2", {})
+    ss.setdefault("params_mhcii", {})      # step 2: IEDB alleles and peptide length
+    ss.setdefault("params_viz", {})        # step 7: 3D representation controls
+    ss.setdefault("pdb_path", None)        # step 7: the uploaded structure, kept by path
+    ss.setdefault("cons_mode_local", True)  # step 4: local reimplementation vs. manual CSV upload
     # one *list* of files per method (b2/b3/p/n/x) so several species can be analysed together;
     # 'm' (MHC-II) stays a single directory of Protein_Specie.html files
     ss.setdefault("poa1_sources", {})
@@ -60,6 +109,9 @@ def _init_state():
     ss.setdefault("conservancy_ready", False)
     ss.setdefault("comparison_sets", {})   # SPECIE -> comparison FASTA path
     ss.setdefault("poa2_result", None)
+    # the parameters 'poa2_result' was produced with, so a table left on screen after the form
+    # changed can be told apart from the output of the values currently shown
+    ss.setdefault("poa2_ran_with", None)
     return ss
 
 
@@ -115,6 +167,24 @@ def _adopt_run(path: Path):
     st.rerun()
 
 
+def _full_reset():
+    """
+    Start over from nothing: every field, every result, and the analysis binding itself.
+
+    ``_reset_analysis_state`` deliberately keeps the filter parameters, because opening a second
+    analysis usually means running the same parameters over other data. The sidebar button is the
+    opposite intent — a clean slate — so this clears the form keys and the widget keys too, which
+    includes the step selector, and leaves ``run_path`` unset so the session lands back on the
+    analysis picker and a *new folder* is created there.
+
+    Nothing on disk is touched: the previous analysis stays in ``results/`` to compare against,
+    and a fresh folder is what keeps its files from mixing into the next test.
+    """
+    for key in list(ss.keys()):
+        del ss[key]
+    _init_state()
+
+
 def _select_run() -> backend.WorkContext:
     """
     Bind this session to one analysis folder, asking which before anything else runs.
@@ -126,12 +196,26 @@ def _select_run() -> backend.WorkContext:
 
     if ss.run_path:
         path = Path(ss.run_path)
+        # Every run leaves a full DEBUG log inside its own analysis folder. That is what makes a
+        # run reproducible across environments: the analysis is tuned on one machine and executed
+        # on another, and the log travels with the results instead of with the terminal.
+        use_log_file(str(path / "poa.log"))
         with st.sidebar:
             st.markdown("### Análise")
             st.success(f"**{path.name or root.name}**")
-            if st.button("Trocar de análise"):
-                ss.run_path = None
-                st.rerun()
+            c_switch, c_new = st.columns(2)
+            with c_switch:
+                if st.button("Trocar de análise", width="stretch",
+                             help="Abrir outra análise já gravada, mantendo os parâmetros de "
+                                  "filtragem desta."):
+                    ss.run_path = None
+                    st.rerun()
+            with c_new:
+                if st.button("🆕 Nova análise", type="primary", width="stretch",
+                             help="Limpa todos os campos e resultados e cria uma pasta nova. "
+                                  "A análise atual continua gravada em results/."):
+                    _full_reset()
+                    st.rerun()
         return backend.open_run(root, path)
 
     runs = backend.list_runs(root)
@@ -197,7 +281,10 @@ with st.sidebar:
     st.write(f"{_status_icon(ss.conservancy_ready)} Conservancy pronta")
     st.write(f"{_status_icon(ss.poa2_result is not None)} POA2 executado")
     st.divider()
-    step = st.radio("Etapa", STEPS)
+    # Keyed so it shows up in session state and is therefore cleared by _full_reset — an unkeyed
+    # radio keeps its selection internally, and "Nova análise" would land on whatever step the
+    # previous analysis was left on instead of step 1.
+    step = st.radio("Etapa", STEPS, key="step_radio")
     st.divider()
     st.markdown("### Resultados")
     st.caption("Tudo desta análise é gravado aqui. Outra análise, outra pasta — repetir uma "
@@ -216,13 +303,14 @@ def step_inputs():
              "**Para analisar mais de uma espécie**, inclua todas as proteínas — no mesmo FASTA "
              "ou em vários arquivos; eles são unidos em um único `-f`.")
     ups = st.file_uploader("FASTA de proteínas (-f)", type=["fasta", "fa", "faa", "txt"],
-                           accept_multiple_files=True)
+                           accept_multiple_files=True, help=HELP["proteins_fasta"])
     if ups:
         ss.ref_raw = [backend.save_upload(ctx.inputs_dir, f"ref_{i}_{u.name}", u.getvalue())
                       for i, u in enumerate(ups)]
 
     swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `denv1_ns1`) — inverter "
-                       "os dois primeiros campos", value=ss.ref_swap, key="ref_swap_cb")
+                       "os dois primeiros campos", value=ss.ref_swap, key="ref_swap_cb",
+                       help=HELP["swap_headers"])
     ss.ref_swap = swap
 
     if ss.ref_raw:
@@ -244,7 +332,7 @@ def step_inputs():
                                     "Espécie": r["specie"], "ID": r["id"],
                                     "Resíduos": r["length"],
                                     "Ambíguos": r["ambiguous"] or "—"} for r in rows]),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
 
         empty = [r["header"] for r in rows if r["length"] == 0]
         if empty:
@@ -274,20 +362,28 @@ def step_inputs():
     st.subheader("Parâmetros de filtragem (opcionais)")
     c1, c2, c3 = st.columns(3)
     with c1:
-        bmin = st.number_input("Bepipred min (bmin)", 0, 100, ss.params_poa1.get("bmin", 0))
-        bmax = st.number_input("Bepipred max (bmax)", 0, 100, ss.params_poa1.get("bmax", 0))
+        bmin = st.number_input("Bepipred min (bmin)", 0, 100, ss.params_poa1.get("bmin", 0),
+                               help=HELP["len_min"])
+        bmax = st.number_input("Bepipred max (bmax)", 0, 100, ss.params_poa1.get("bmax", 0),
+                               help=HELP["len_max"])
     with c2:
-        pmin = st.number_input("PAP min (pmin)", 0, 100, ss.params_poa1.get("pmin", 0))
-        pmax = st.number_input("PAP max (pmax)", 0, 100, ss.params_poa1.get("pmax", 0))
+        pmin = st.number_input("PAP min (pmin)", 0, 100, ss.params_poa1.get("pmin", 0),
+                               help=HELP["len_min"])
+        pmax = st.number_input("PAP max (pmax)", 0, 100, ss.params_poa1.get("pmax", 0),
+                               help=HELP["len_max"])
     with c3:
-        xmin = st.number_input("Outros min (xmin)", 0, 100, ss.params_poa1.get("xmin", 0))
-        xmax = st.number_input("Outros max (xmax)", 0, 100, ss.params_poa1.get("xmax", 0))
+        xmin = st.number_input("Outros min (xmin)", 0, 100, ss.params_poa1.get("xmin", 0),
+                               help=HELP["len_min"])
+        xmax = st.number_input("Outros max (xmax)", 0, 100, ss.params_poa1.get("xmax", 0),
+                               help=HELP["len_max"])
     c4, c5, c6 = st.columns(3)
     with c4:
         mhla = st.selectbox("Classe HLA (MHC-II)", ["DR", "DP", "DQ"],
-                            index=["DR", "DP", "DQ"].index(ss.params_poa1.get("mhla", "DR")))
+                            index=["DR", "DP", "DQ"].index(ss.params_poa1.get("mhla", "DR")),
+                            help=HELP["mhla"])
     with c5:
-        mic = st.number_input("IC50 threshold (mic, nM)", 0, 50000, ss.params_poa1.get("mic", 50))
+        mic = st.number_input("IC50 threshold (mic, nM)", 0, 50000, ss.params_poa1.get("mic", 50),
+                              help=HELP["mic"])
     with c6:
         export = st.checkbox("Exportar .xlsx por método (-e)", value=ss.params_poa1.get("e", "n") == "y")
 
@@ -367,7 +463,8 @@ def _import_bepipred2_original():
                "reconstruímos as proteínas de referência (-f) a partir do próprio array `AA` do "
                "JSON. Vários antígenos no mesmo arquivo podem ser espécies diferentes.")
 
-    raw = st.file_uploader("BepiPred-2.0 (.json)", type=["json"], key="up_b2_raw")
+    raw = st.file_uploader("BepiPred-2.0 (.json)", type=["json"], key="up_b2_raw",
+                           help=HELP["b2_json"])
     if raw is not None:
         raw_path = backend.save_upload(ctx.inputs_dir, f"raw_{raw.name}", raw.getvalue())
         try:
@@ -405,10 +502,12 @@ def _import_bepipred2_original():
                     st.text_input("Chave no JSON", str(key), disabled=True,
                                   key=f"rd_key_{i}", label_visibility=vis)
                 with c2:
-                    sp = st.text_input("Espécie", tokens[0], key=f"rd_sp_{i}", label_visibility=vis)
+                    sp = st.text_input("Espécie", tokens[0], key=f"rd_sp_{i}",
+                                       label_visibility=vis, help=HELP["map_specie"])
                 with c3:
                     prot = st.text_input("Proteína", tokens[1] if len(tokens) > 1 else "E",
-                                         key=f"rd_prot_{i}", label_visibility=vis)
+                                         key=f"rd_prot_{i}", label_visibility=vis,
+                                         help=HELP["map_protein"])
                 mapping[key] = ((prot.strip().upper() or "E"), sp.strip().upper(), "ref")
 
             if st.button("Adaptar e adicionar", key="rd_import_btn"):
@@ -443,8 +542,14 @@ def _import_bepipred2_original():
 
 
 def _manual_upload(label: str, key: str, types, filename: str):
-    """Upload one file *per species* for a method; they are merged into the single POA1 input."""
-    ups = st.file_uploader(label, type=types, key=f"up_{key}", accept_multiple_files=True)
+    """
+    Upload one file *per species* for a method; they are merged into the single POA1 input.
+
+    The tooltip comes from ``HELP['upload_<method>']`` — each tool's file format is the thing
+    people actually get wrong, so the guidance is per method rather than generic.
+    """
+    ups = st.file_uploader(label, type=types, key=f"up_{key}", accept_multiple_files=True,
+                           help=HELP.get(f"upload_{key}"))
     if ups:
         stem = filename.rsplit(".", 1)[0]
         ss.poa1_sources[key] = [
@@ -490,7 +595,7 @@ def _render_source_previews(sources):
             if prev.proteins:
                 st.write("**Proteínas:** " + ", ".join(prev.proteins))
             if prev.rows:
-                st.dataframe(pd.DataFrame(prev.rows), use_container_width=True,
+                st.dataframe(pd.DataFrame(prev.rows), width="stretch",
                              hide_index=True, height=240)
             if prev.head:
                 st.code(prev.head, language=None)
@@ -535,14 +640,20 @@ def step_predictions():
     with st.expander("🅃 Células T-auxiliares — MHC-II Binding (IEDB)", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
-            alleles = st.text_input("Alelos (separados por vírgula)", "HLA-DRB1*01:01")
+            alleles = st.text_input("Alelos (separados por vírgula)",
+                                    ss.params_mhcii.get("alleles", "HLA-DRB1*01:01"),
+                                    help=HELP["mhcii_alleles"])
         with c2:
-            length = st.number_input("Comprimento do peptídeo", 9, 25, 15)
+            length = st.number_input("Comprimento do peptídeo", 9, 25,
+                                     int(ss.params_mhcii.get("length", 15)),
+                                     help=HELP["mhcii_length"])
+        ss.params_mhcii = dict(alleles=alleles, length=int(length))
         if st.button("Automatizar MHC-II (API IEDB)"):
             _automate_mhcii(alleles, int(length))
         st.caption("Plano B: envie os .html (um por proteína, nomeados `Proteína_Espécie.html`).")
         ups = st.file_uploader("Upload MHC-II (.html, múltiplos)", type=["html", "htm"],
-                               accept_multiple_files=True, key="up_m_multi")
+                               accept_multiple_files=True, key="up_m_multi",
+                               help=HELP["mhcii_upload"])
         if ups:
             for up in ups:
                 backend.save_upload(ctx.mhcii_dir, up.name, up.getvalue())
@@ -616,18 +727,18 @@ def step_poa1():
                        "nome da proteína, marque a caixa de inversão `Espécie_Proteína`.")
 
         st.subheader("Epítopos consolidados")
-        st.dataframe(df, use_container_width=True, height=320)
+        st.dataframe(df, width="stretch", height=320)
 
         summ = backend.predictions_summary(df)
         c1, c2 = st.columns(2)
         with c1:
             st.plotly_chart(px.bar(summ["by_method"], x="Method", y="count",
-                                   title="Epítopos por método"), use_container_width=True)
+                                   title="Epítopos por método"), width="stretch")
         with c2:
             st.plotly_chart(px.bar(summ["by_species"], x="Specie", y="count",
-                                   title="Epítopos por espécie"), use_container_width=True)
+                                   title="Epítopos por espécie"), width="stretch")
         st.plotly_chart(px.bar(summ["length_hist"], x="length", y="count",
-                               title="Distribuição de comprimento dos epítopos"), use_container_width=True)
+                               title="Distribuição de comprimento dos epítopos"), width="stretch")
 
         report = Path(ss.poa1_result.report_path)
         if report.exists():
@@ -667,12 +778,13 @@ def _declare_uploaded_threshold():
                "etapa 5 não tem como validar o que está filtrando.")
     c1, c2 = st.columns([1, 2])
     with c1:
-        man_t = st.number_input("Limiar usado (%)", 1, 100, int(ss.threshold), key="man_cons_t")
+        man_t = st.number_input("Limiar usado (%)", 1, 100, int(ss.threshold), key="man_cons_t",
+                                help=HELP["cons_declared_threshold"])
     with c2:
         man_op = st.radio("Critério usado", [">=", "<"],
                           index=0 if ss.cons_operator == ">=" else 1,
                           format_func=lambda op: "Conservados (≥)" if op == ">=" else "Únicos (<)",
-                          horizontal=True, key="man_cons_op")
+                          horizontal=True, key="man_cons_op", help=HELP["poa2_declared_op"])
     if st.button("Registrar", key="cons_declare_btn"):
         conservancy_parser.write_metadata(csv_dir, man_t, man_op, source="manual")
         ss.threshold = int(man_t)
@@ -690,17 +802,21 @@ def step_conservancy():
 
     c1, c2 = st.columns([1, 2])
     with c1:
-        ss.threshold = st.number_input("Limiar de identidade de sequência (%)", 1, 100, ss.threshold)
+        ss.threshold = st.number_input("Limiar de identidade de sequência (%)", 1, 100,
+                                       ss.threshold, help=HELP["cons_threshold"])
     with c2:
         ss.cons_operator = st.radio(
             "Critério", [">=", "<"],
             index=0 if ss.cons_operator == ">=" else 1,
             format_func=lambda op: "Conservados (≥ limiar)" if op == ">=" else "Únicos (< limiar)",
-            horizontal=True)
+            horizontal=True, help=HELP["cons_operator"])
     st.caption("O critério escolhido aqui decide quais proteínas contam como *match* e fica gravado "
                "junto dos CSVs. Ele precisa ser o mesmo objetivo da etapa 5 — o POA2 recusa a "
                "execução se divergirem, em vez de apenas rotular a coluna com o valor errado.")
-    mode = st.radio("Modo", ["Reimplementação local (recomendado)", "Upload manual dos CSVs"])
+    modes = ["Reimplementação local (recomendado)", "Upload manual dos CSVs"]
+    mode = st.radio("Modo", modes, index=0 if ss.cons_mode_local else 1,
+                    help=HELP["cons_mode"])
+    ss.cons_mode_local = mode == modes[0]
 
     # POA1 wrote one epitope FASTA per species; each must be compared against its OWN protein set.
     epitope_files = sorted(ctx.conservancy_epitopes_dir.glob("*_epitopes.fasta"))
@@ -718,7 +834,8 @@ def step_conservancy():
         ref_counts = backend.count_proteins_by_specie(ss.proteins_path) if ss.proteins_path else {}
         for sp in species:
             up = st.file_uploader(f"FASTA de comparação para {sp} (opcional)",
-                                  type=["fasta", "fa", "faa", "txt"], key=f"comp_{sp}")
+                                  type=["fasta", "fa", "faa", "txt"], key=f"comp_{sp}",
+                                  help=HELP["comparison_set"])
             if up is not None:
                 ss.comparison_sets[sp] = backend.save_upload(
                     ctx.inputs_dir, f"comparison_{sp}.fasta", up.getvalue())
@@ -760,7 +877,8 @@ def step_conservancy():
                    "cabeçalho do arquivo traz essa informação (é o caso dos downloads do IEDB), ela "
                    "é lida daí; senão, informe abaixo.")
         ups = st.file_uploader("CSVs da Conservancy Analysis (IEDB)", type=["csv"],
-                               accept_multiple_files=True, key="cons_csvs")
+                               accept_multiple_files=True, key="cons_csvs",
+                               help=HELP["cons_csv_upload"])
         if ups:
             # Any metadata already here describes the CSVs being replaced, not these.
             stale = ctx.conservancy_csv_dir / conservancy_parser.METADATA_FILENAME
@@ -782,7 +900,7 @@ def step_conservancy():
         for error in overview.attrs.get("errors", []):
             st.warning(f"Não foi possível resumir o CSV: {error}")
         if not overview.empty:
-            st.dataframe(overview, use_container_width=True, hide_index=True)
+            st.dataframe(overview, width="stretch", hide_index=True)
             st.caption("**Com match** = epítopos com ao menos uma proteína casando no limiar com "
                        "que o arquivo foi gerado. É sobre essa coluna que o filtro `-m` do POA2 "
                        "age na etapa 5.")
@@ -795,12 +913,12 @@ def step_conservancy():
                                      var_name="Medida", value_name="count"),
                        x="Espécie", y="count", color="Medida", barmode="group",
                        title="Epítopos por espécie e quantos têm match"),
-                use_container_width=True)
+                width="stretch")
 
         for c in csvs:
             with st.expander(f"📄 {c.name}"):
                 try:
-                    st.dataframe(pd.read_csv(c), use_container_width=True, height=300)
+                    st.dataframe(pd.read_csv(c), width="stretch", height=300)
                 except (OSError, ValueError, pd.errors.ParserError) as exc:
                     st.warning(f"Não foi possível ler {c.name}: {exc}")
                 _download(c, f"⬇️ {c.name}", "text/csv")
@@ -851,6 +969,15 @@ def _resume_from_results():
     if st.button("Retomar com estes arquivos"):
         ss.proteins_path = str(paths[pick])
         ss.conservancy_ready = True
+        # Adopt the threshold/operator the CSVs were produced with. Resuming used to leave both at
+        # their initial defaults (70 and '>='), which are not a value anyone chose: in a session
+        # that never ran step 4, step 5's fallback then applied 70 to data built at something else.
+        resumed = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
+        if resumed.threshold is not None:
+            ss.threshold = int(resumed.threshold)
+        if resumed.operator:
+            ss.cons_operator = (">=" if conservancy_parser.operator_family(resumed.operator) == "ge"
+                                else "<")
         # also rebuild the POA1 table from the epitope FASTAs, so the results (etapa 6) and the
         # 2D/3D views (etapa 7) work in the resumed session too
         if ss.poa1_result is None:
@@ -876,10 +1003,28 @@ def step_poa2():
     # column, so a run could report "conservados ≥70%" while filtering CSVs computed at ≤100%.
     source = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
     if source.origin == "unknown":
+        # Nothing in the directory declares the threshold, so it has to come from the user. This
+        # used to read ss.threshold silently, which is only the value chosen in step 4 when step 4
+        # ran in *this* session — after resuming an analysis from disk it was the initial 70.
         st.warning("Não foi possível descobrir com que limiar os CSVs desta pasta foram gerados — "
-                   "não há metadados e o cabeçalho não traz o valor. O POA2 vai usar o limiar da "
-                   "etapa 4 **sem conseguir validá-lo**; confira antes de usar os resultados.")
-        t_value, op_value = int(ss.threshold), ss.cons_operator
+                   "não há metadados e o cabeçalho não traz o valor. Informe abaixo com que limiar "
+                   "e critério eles foram produzidos. O POA2 vai aplicá-los **sem conseguir "
+                   "validá-lo**; confira antes de usar os resultados.")
+        c_t, c_op = st.columns([1, 2])
+        with c_t:
+            t_value = int(st.number_input("Limiar de identidade (t, %)", 1, 100,
+                                          int(ss.threshold), key="poa2_t_declared",
+                                          help=HELP["poa2_declared_t"]))
+        with c_op:
+            op_value = st.radio(
+                "Critério dos CSVs", [">=", "<"],
+                index=0 if ss.cons_operator == ">=" else 1,
+                format_func=lambda op: "Conservados (≥)" if op == ">=" else "Únicos (<)",
+                horizontal=True, key="poa2_op_declared", help=HELP["poa2_declared_op"])
+        ss.threshold, ss.cons_operator = t_value, op_value
+        st.caption("Para não precisar informar isto de novo, registre o limiar na etapa 4 — ela "
+                   "grava um `conservancy_meta.json` junto dos CSVs, e aí a etapa 5 passa a ler "
+                   "daí e a validar o que está filtrando.")
     else:
         t_value, op_value = int(source.threshold), source.operator
         origem = ("metadados gravados na etapa 4" if source.origin == "meta"
@@ -896,27 +1041,42 @@ def step_poa2():
                            + ", ".join(weak) + ". Refaça a etapa 4 com um conjunto de diversidade "
                            "se estes resultados forem usados.")
 
+    # Every widget here reads its default from ss.params_poa2 and is written back below, so
+    # navigating to another step and returning restores the form instead of resetting the filters
+    # to 60/100/60 — see STATE POLICY at the top of this module.
+    saved = ss.params_poa2
+    objectives = ["conserved", "unique"]
+    # The objective is the one field NOT restored from the saved form: it has to follow the
+    # operator the CSVs were produced with, which is the whole point of reading that operator
+    # back. Restoring it would carry the previous analysis's objective onto CSVs built the other
+    # way round, turning a form that used to agree with the data into a blocked run.
+    default_objective = "unique" if conservancy_parser.operator_family(op_value) == "lt" else "conserved"
+    rf_options = [None, 0, 1, 2, 3]
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        objective = st.radio("Objetivo", ["conserved", "unique"],
-                             index=1 if conservancy_parser.operator_family(op_value) == "lt" else 0,
-                             format_func=lambda x: "Conservados (≥)" if x == "conserved" else "Únicos (<)")
+        objective = st.radio("Objetivo", objectives,
+                             index=objectives.index(default_objective),
+                             format_func=lambda x: "Conservados (≥)" if x == "conserved" else "Únicos (<)",
+                             help=HELP["poa2_objective"])
         rf = st.selectbox("FASTA por topologia (-rf)",
-                          [None, 0, 1, 2, 3],
+                          rf_options,
+                          index=rf_options.index(saved.get("rf")) if saved.get("rf", None) in rf_options else 0,
                           format_func=lambda v: {None: "não gerar", 0: "todos", 1: "externos",
-                                                 2: "transmembrana", 3: "internos"}[v])
+                                                 2: "transmembrana", 3: "internos"}[v],
+                          help=HELP["poa2_rf"])
     with c2:
-        imin = st.number_input("Identidade mín. (%)", 0, 100, 60)
-        imax = st.number_input("Identidade máx. (%)", 0, 100, 100)
+        imin = st.number_input("Identidade mín. (%)", 0, 100, int(saved.get("imin", 60)),
+                               help=HELP["poa2_imin"])
+        imax = st.number_input("Identidade máx. (%)", 0, 100, int(saved.get("imax", 100)),
+                               help=HELP["poa2_imax"])
     with c3:
-        mmatch = st.number_input("% de sequências com match (-m)", 0, 100, 60)
+        mmatch = st.number_input("% de sequências com match (-m)", 0, 100, int(saved.get("m", 60)),
+                                 help=HELP["poa2_m"])
         st.metric("Limiar aplicado (t)", f"{op_value} {t_value}%")
         identity_filter = st.checkbox(
-            "Usar o limiar também como filtro", value=False,
-            help="Por padrão o limiar só define a coluna de % de matches, como no POA original. "
-                 "Marcado, o POA2 também descarta epítopos cuja identidade não satisfaça o "
-                 "critério: ≥ exige que a identidade mínima alcance o limiar (conservado em todo o "
-                 "conjunto); < exige que a máxima fique abaixo dele (único).")
+            "Usar o limiar também como filtro", value=bool(saved.get("idf", False)),
+            help=HELP["poa2_idf"])
 
     requested_symbol = ">=" if objective == "conserved" else "<"
     mismatch = (source.origin != "unknown"
@@ -929,6 +1089,7 @@ def step_poa2():
 
     params = dict(objective=objective, t=t_value, imin=imin, imax=imax, m=mmatch, rf=rf,
                   idf=identity_filter)
+    ss.params_poa2 = dict(params)   # the form as it now stands, for the next time this step renders
 
     # Where the epitopes are lost, computed from the CSVs with the parameters currently on screen.
     # POA2 only ever reported the survivors, so an empty result could not be told from a bound set
@@ -942,12 +1103,12 @@ def step_poa2():
         kept, total = int(funnel["Epítopos"].iloc[-1]), int(funnel["Epítopos"].iloc[0])
         c1, c2 = st.columns([2, 3])
         with c1:
-            st.dataframe(funnel, use_container_width=True, hide_index=True)
+            st.dataframe(funnel, width="stretch", hide_index=True)
             st.metric("Epítopos que seguem para a topologia", f"{kept} de {total}")
         with c2:
             st.plotly_chart(px.bar(funnel, x="Epítopos", y="Etapa", orientation="h",
                                    title="Epítopos restantes após cada filtro"),
-                            use_container_width=True)
+                            width="stretch")
         st.caption("Calculado a partir dos CSVs da etapa 4 com os parâmetros acima — ainda sem "
                    "rodar o TMHMM. A etapa seguinte do POA2 é a topologia de membrana, que não "
                    "descarta epítopos: apenas acrescenta as colunas `Portion_*`.")
@@ -975,21 +1136,33 @@ def step_poa2():
             st.code('pip install "numpy<2"\npip install --no-build-isolation pyTMHMM', language="bash")
 
     if st.button("▶️ Executar POA2", type="primary", disabled=mismatch or not tmhmm_ok):
+        # Drop the previous run before starting. Without this, a run that raises leaves the old
+        # table on screen under "Saída do POA2", directly below a funnel computed with the new
+        # parameters — reading as if the failed parameters had produced it.
+        ss.poa2_result = None
+        ss.poa2_ran_with = None
         with st.status("Executando POA2 (conservância + TMHMM)…", expanded=True) as status:
             try:
                 ss.poa2_result = backend.run_poa2(ctx, params, ss.proteins_path)
+                ss.poa2_ran_with = dict(params)
                 status.update(label="POA2 concluído.", state="complete")
             except Exception as exc:
                 status.update(label="POA2 falhou.", state="error")
                 st.exception(exc)
+                return
 
     if ss.poa2_result is not None:
         st.divider()
         st.subheader("Saída do POA2")
+        if ss.poa2_ran_with != params:
+            st.warning("Esta tabela é de uma execução **anterior**, com outros parâmetros — os "
+                       "valores agora na tela ainda não foram executados. O funil acima já reflete "
+                       "os valores atuais, então os dois podem discordar. Execute o POA2 de novo "
+                       "para alinhá-los.")
         result = ss.poa2_result.results
         st.write(f"**{len(result)} epítopo(s) selecionado(s).** Critério aplicado: "
                  f"`{ss.poa2_result.type_symbol}`.")
-        st.dataframe(result, use_container_width=True, height=300)
+        st.dataframe(result, width="stretch", height=300)
         st.caption("Os downloads e o resumo por topologia estão na etapa 6.")
 
 
@@ -1007,13 +1180,13 @@ def step_results():
     if ss.poa2_result is not None:
         df = ss.poa2_result.results
         st.subheader("Epítopos selecionados (POA2)")
-        st.dataframe(df, use_container_width=True, height=320)
+        st.dataframe(df, width="stretch", height=320)
 
         topo = backend.topology_summary(df)
         if not topo.empty:
             st.plotly_chart(px.bar(topo, x="region", y="mean_fraction",
                                    title="Fração média por topologia de membrana"),
-                            use_container_width=True)
+                            width="stretch")
         st.subheader("Downloads")
         _download(Path(ss.poa2_result.xlsx_path), "⬇️ Planilha POA2 (.xlsx)",
                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -1039,39 +1212,61 @@ def step_viz():
     st.subheader("Mapa 2D de epítopos")
     st.caption("Cada segmento é um epítopo ao longo da sequência; uma trilha por proteína/espécie, "
                "colorido por método.")
-    st.plotly_chart(viz.epitope_map_figure(df), use_container_width=True)
+    st.plotly_chart(viz.epitope_map_figure(df), width="stretch")
 
     # --- 3D structure viewer (upload a PDB) ---
     st.subheader("Estrutura 3D (envie um PDB)")
     st.caption("Estilo Discovery Studio: epítopos destacados sobre a estrutura. O visualizador usa "
                "3Dmol.js (precisa de internet para renderizar).")
 
+    saved = ss.params_viz
     tracks = sorted({f"{r.Protein}|{r.Specie}" for r in df.itertuples()})
-    choice = st.selectbox("Epítopos de qual proteína/espécie destacar?", tracks)
+    styles = ["cartoon", "stick", "sphere"]
+    # The track list depends on the POA1 table, so a remembered choice is only offered back while
+    # it still exists; otherwise this would select a protein that is no longer in the results.
+    choice = st.selectbox("Epítopos de qual proteína/espécie destacar?", tracks,
+                          index=tracks.index(saved["track"])
+                          if saved.get("track") in tracks else 0)
     c1, c2, c3 = st.columns(3)
     with c1:
-        base_style = st.selectbox("Representação", ["cartoon", "stick", "sphere"], index=0)
+        base_style = st.selectbox("Representação", styles,
+                                  index=styles.index(saved.get("style", "cartoon")),
+                                  help=HELP["viz_style"])
     with c2:
-        surface = st.checkbox("Mostrar superfície", value=False)
+        surface = st.checkbox("Mostrar superfície", value=bool(saved.get("surface", False)),
+                              help=HELP["viz_surface"])
     with c3:
-        chain = st.text_input("Cadeia (opcional)", "")
+        chain = st.text_input("Cadeia (opcional)", saved.get("chain", ""),
+                              help=HELP["viz_chain"])
+    ss.params_viz = dict(track=choice, style=base_style, surface=surface, chain=chain)
 
-    pdb_up = st.file_uploader("Arquivo .pdb", type=["pdb", "ent"], key="pdb_up")
+    pdb_up = st.file_uploader("Arquivo .pdb", type=["pdb", "ent"], key="pdb_up",
+                              help=HELP["viz_pdb"])
     if pdb_up is not None:
+        # An uploader is emptied when its step is not rendered, and this was the one upload read
+        # straight from the widget instead of being saved: leaving step 7 and returning dropped
+        # the structure and the 3D view with it. Saved like every other input and kept by path.
+        ss.pdb_path = backend.save_upload(ctx.inputs_dir, f"structure_{pdb_up.name}",
+                                          pdb_up.getvalue())
+    if ss.pdb_path and not Path(ss.pdb_path).is_file():
+        ss.pdb_path = None     # the analysis folder was cleaned up under us
+
+    if ss.pdb_path:
         prot, spec = choice.split("|")
         ranges = viz.epitope_ranges(df, protein=prot, specie=spec)
         try:
             html = viz.build_3dmol_view_html(
-                pdb_up.getvalue().decode("utf-8", "replace"),
+                Path(ss.pdb_path).read_text(encoding="utf-8", errors="replace"),
                 ranges,
                 chain=chain or None,
                 base_style=base_style,
                 show_surface=surface,
             )
-            components.html(html, height=520)
-            st.caption(f"{len(ranges)} epítopo(s) de {prot}_{spec} destacado(s) em vermelho. "
-                       "Atenção: a numeração de resíduo do PDB precisa corresponder à posição na "
-                       "sequência usada nas predições (cuidado com gaps/offset).")
+            _embed_html(html, height=520)
+            st.caption(f"{len(ranges)} epítopo(s) de {prot}_{spec} destacado(s) em vermelho "
+                       f"(estrutura: `{Path(ss.pdb_path).name}`). Atenção: a numeração de resíduo "
+                       "do PDB precisa corresponder à posição na sequência usada nas predições "
+                       "(cuidado com gaps/offset).")
         except Exception as exc:  # noqa: BLE001 - surface the error to the user, don't crash the app
             st.error(f"Não foi possível renderizar a estrutura: {exc}")
     else:

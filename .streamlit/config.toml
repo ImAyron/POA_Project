@@ -1,0 +1,22 @@
+# Streamlit configuration for the POA interface.
+#
+# The point of this file is a readable terminal: the pipeline's own log is the thing worth seeing
+# there, and anything else competing with it makes a run harder to follow.
+
+[server]
+# Do not try to open a browser on startup. Under WSL — the documented way to run POA2, since
+# pyTMHMM has no Windows wheel — there is no browser to open, and the attempt printed
+# "gio: http://localhost:8501: Operation not supported" into the log on every start.
+# Open http://localhost:8501 yourself; set this to false if you run natively and prefer the
+# browser to open on its own.
+headless = true
+
+[browser]
+# Suppress the usage-statistics notice and the collection itself. This pipeline handles
+# unpublished research sequences, so nothing about a session should leave the machine.
+gatherUsageStats = false
+
+[logger]
+# Streamlit's own logger. 'warning' keeps real problems (a failed rerun, a port conflict) while
+# dropping its routine startup chatter, which is not about the analysis.
+level = "warning"

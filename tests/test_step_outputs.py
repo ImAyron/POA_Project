@@ -252,6 +252,42 @@ def test_step5_shows_the_funnel_even_without_pytmhmm(tmp_path, monkeypatch, csv_
     assert next(b for b in at.button if "POA2" in b.label).disabled
 
 
+def test_step5_marks_a_poa2_table_left_from_an_earlier_run(tmp_path, monkeypatch, csv_dir):
+    """
+    The output block must say when its table predates the parameters on screen.
+
+    Step 5 renders ``poa2_result`` whenever it is set, while the funnel above it is recomputed
+    from the form on every rerun. Changing a parameter without pressing Executar therefore put a
+    stale table directly under a current funnel, with nothing marking which was which.
+    """
+    apptest = pytest.importorskip("streamlit.testing.v1", reason="streamlit not installed")
+    from types import SimpleNamespace
+
+    from poa.services import tmhmm_client
+
+    monkeypatch.setenv("POA_RESULTS_DIR", str(tmp_path))
+    monkeypatch.setattr(tmhmm_client, "is_available", lambda: True)
+    assert csv_dir.parent == tmp_path
+
+    earlier = SimpleNamespace(
+        results=pd.DataFrame({"Epitope name": ["SP_E_BEPIPRED_1_5"]}),
+        type_symbol=">=", xlsx_path=str(tmp_path / "old.xlsx"), fasta_path=None)
+
+    app = str(Path(__file__).resolve().parents[1] / "poa" / "gui" / "app.py")
+    at = apptest.AppTest.from_file(app, default_timeout=90)
+    at.session_state["run_path"] = str(tmp_path)
+    at.session_state["conservancy_ready"] = True
+    at.session_state["proteins_path"] = "proteins.fasta"
+    at.session_state["poa2_result"] = earlier
+    at.session_state["poa2_ran_with"] = {"objective": "conserved", "t": 70, "imin": 0,
+                                       "imax": 100, "m": 99, "rf": None, "idf": False}
+    at.run()
+    at.sidebar.radio[0].set_value("5 · POA2 (conservação + topologia)").run()
+
+    assert not at.exception
+    assert any("ainda não foram executados" in str(w.value) for w in at.warning)
+
+
 def test_fasta_headers_report_length_and_ambiguous_residues(tmp_path):
     path = tmp_path / "proteins.fasta"
     path.write_text(">NS1_DENV1_ref\nMKTAYIX\n>E_DENV2_ref\nGGAYIGG\n", encoding="utf-8")

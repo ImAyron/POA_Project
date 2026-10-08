@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from Bio import SeqIO
 
-from ..logging_conf import get_logger
+from ..logging_conf import TAG_WARN, get_logger
 
 logger = get_logger("realdata_import")
 
@@ -170,7 +170,8 @@ def prepare_bepipred2(
     full_seq = "".join(entry.sequence for entry in entries)
     has_x = "x" in full_seq.lower()
     if has_x:
-        logger.warning("%s: reference for %s contains 'X' — POA1 will refuse it (-f integrity check).", json_path, stem)
+        logger.warning("%s service/realdata-import | %s: reference for %s contains 'X' — "
+                       "POA1 will refuse it (-f integrity check).", TAG_WARN, json_path, stem)
 
     return Prepared(
         specie=species[0] if mapping else specie,

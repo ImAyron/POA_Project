@@ -13,7 +13,10 @@ def fasta_epitopes(fasta, lenght_min, lenght_max):
     Extracts and organizes epitopes from a FASTA file, applying optional length constraints.
 
     Header format:
-        >Protein_Specie_Method_[NP_]ID_Init_Final
+        >Protein_Specie_Method_[[NP_]ID_]Init_Final
+
+    The NCBI ID is optional — the README documents it as "se houver" — so a five-field header
+    (``Protein_Specie_Method_Init_Final``) is valid and yields an empty ``ID_Sequence``.
     """
     # Create a new DataFrame to store results
     results_df = pd.DataFrame(columns=["Method", "Specie", "Protein", "ID_Sequence", "Initial Position", "Final Position", "Peptide Sequence"])
@@ -21,9 +24,13 @@ def fasta_epitopes(fasta, lenght_min, lenght_max):
     # A FASTA record may span several lines; line wrapping must not split an epitope.
     for index, record in enumerate(SeqIO.parse(fasta, "fasta")):
         fields = record.id.upper().split("_")
-        if len(fields) < 6 or not all(fields):
+        # Five fields is the ID-less form: requiring six rejected headers the README calls valid,
+        # and 'fields[3:-2]' already collapses to '' for them.
+        if len(fields) < 5 or not all(fields):
             raise ValueError(
-                f"Invalid epitope header '{record.id}'; expected Protein_Specie_Method_ID_Init_Final."
+                f"Invalid epitope header '{record.id}'; expected "
+                "Protein_Specie_Method_Init_Final, optionally with an NCBI ID before the "
+                "positions (Protein_Specie_Method_ID_Init_Final)."
             )
         protein, species, method = fields[:3]
         results_df.loc[index] = [

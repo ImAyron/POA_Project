@@ -97,9 +97,29 @@ def build_3dmol_view_html(
 ) -> str:
     """
     Return self-rendering HTML (py3Dmol / 3Dmol.js) showing the structure with the given epitope
-    residue ranges highlighted. Needs internet at render time (3Dmol.js is loaded from a CDN).
+    residue ranges highlighted.
+
+    Two runtime requirements that are not this function's to satisfy, and both fail at *render*
+    time rather than at import:
+
+    * **py3Dmol** must be installed (it is in ``requirements.txt``). The import is deferred so the
+      rest of the GUI — and the tests — work without it; a plain ``ImportError`` here would reach
+      the user as "No module named 'py3Dmol'", so it is translated into something actionable.
+    * **Internet**, because the HTML this returns loads 3Dmol.js from a CDN. Nothing can be
+      checked for that here: the fetch happens in the viewer's browser, and an offline machine
+      shows an empty panel rather than raising.
+
+    Raises:
+        RuntimeError: py3Dmol is not installed, with the command that installs it.
     """
-    import py3Dmol
+    try:
+        import py3Dmol
+    except ImportError as exc:
+        raise RuntimeError(
+            "py3Dmol is not installed, so the 3D viewer cannot render. Install it with "
+            "'pip install py3Dmol' (it is listed in requirements.txt). The 2D epitope map above "
+            "does not need it."
+        ) from exc
 
     view = py3Dmol.view(width=width, height=height)
     view.addModel(pdb_text, "pdb")

@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 from typing import List, Optional
 
-from ..logging_conf import get_logger
+from ..logging_conf import get_logger, log_step
 from .base import Cache, ServiceError, ServiceResult, ServiceUnavailable, cached_call
 
 logger = get_logger("bepipred")
@@ -75,9 +75,12 @@ def predict(fasta_path: str, pred: str = "vt_pred", cli: Optional[List[str]] = N
     with open(fasta_path, encoding="utf-8", errors="replace") as fh:
         fasta_content = fh.read()
     params = {"pred": pred}
-    logger.info("Running BepiPred-3.0 (pred=%s) on %s", pred, fasta_path)
-    return cached_call(
-        cache, "bepipred3", "bp3", params, [fasta_content],
-        lambda: run_bepipred3(fasta_path, None, pred, cli, timeout),
-        source="local", ext="fasta", use_cache=use_cache,
-    )
+    with log_step(logger, "service/bepipred-3.0") as step:
+        step.note("input=%s pred=%s", fasta_path, pred)
+        result = cached_call(
+            cache, "bepipred3", "bp3", params, [fasta_content],
+            lambda: run_bepipred3(fasta_path, None, pred, cli, timeout),
+            source="local", ext="fasta", use_cache=use_cache,
+        )
+        step.result(source=result.source, bytes=len(result.content or ""))
+    return result

@@ -14,7 +14,7 @@ import warnings
 
 from Bio import SeqIO
 
-from ..logging_conf import get_logger
+from ..logging_conf import TAG_DATA, get_logger
 
 logger = get_logger("topology")
 
@@ -107,15 +107,15 @@ def tmhmmAnalysis(args, dataframe):
     Returns:
         pd.DataFrame: input dataframe with Portion_Outside / Portion_TM / Portion_Inside filled.
     """
-    logger.info("TMHMM - Epitope Analysis v1.0")
-
     # Check if the protein FASTA file is empty
     if notEmptyValidate(args.f):
         raise Exception("Failed because the protein FASTA file is empty.")
 
-    # Print protein sequences for verification
+    # Per-sequence detail, so DEBUG: 'POA2/topology' already announced itself in pipeline.py, and
+    # at INFO one line per reference sequence buries the stage's own result. The banner that used
+    # to precede this is gone for the same reason — the step boundary says what is running.
     for seq_record in SeqIO.parse(args.f, "fasta"):
-        logger.info("Completed Sequence Analysis: %s", seq_record.id)
+        logger.debug("%s POA2/topology | reference read: %s", TAG_DATA, seq_record.id)
 
     # Add columns for membrane topology classification to the DataFrame
     dataframe = dataframe.assign(Portion_Outside="-")

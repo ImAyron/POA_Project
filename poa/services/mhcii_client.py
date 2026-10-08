@@ -15,7 +15,7 @@ import io
 import os
 from typing import List, Optional, Sequence
 
-from ..logging_conf import get_logger
+from ..logging_conf import get_logger, log_step
 from .base import Cache, ServiceError, ServiceResult, ServiceUnavailable, cached_call
 
 logger = get_logger("mhcii")
@@ -126,9 +126,12 @@ def predict(sequence_text: str, alleles: Sequence[str] | str, length=15, method:
     """Cached MHC-II prediction. Returns a :class:`ServiceResult` with raw TSV content."""
     allele_str = ",".join(alleles) if not isinstance(alleles, str) else alleles
     params = {"method": method, "allele": allele_str, "length": length}
-    logger.info("Requesting IEDB MHC-II prediction (method=%s, alleles=%s, length=%s)", method, allele_str, length)
-    return cached_call(
-        cache, "mhcii", "iedb-api", params, [sequence_text],
-        lambda: submit(sequence_text, allele_str, length, method, timeout),
-        source="api", ext="tsv", use_cache=use_cache,
-    )
+    with log_step(logger, "service/iedb-mhcii") as step:
+        step.note("method=%s alleles=%s length=%s", method, allele_str, length)
+        result = cached_call(
+            cache, "mhcii", "iedb-api", params, [sequence_text],
+            lambda: submit(sequence_text, allele_str, length, method, timeout),
+            source="api", ext="tsv", use_cache=use_cache,
+        )
+        step.result(source=result.source, rows=max(len((result.content or "").splitlines()) - 1, 0))
+    return result
