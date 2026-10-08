@@ -38,6 +38,30 @@ def test_invalid_other_predictor_header_has_actionable_error(tmp_path):
         others.fasta_epitopes(path, 0, 0)
 
 
+def test_other_predictor_header_without_ncbi_id_is_accepted(tmp_path):
+    """
+    The NCBI ID is optional, so five fields is a valid header.
+
+    The README documents it as ``<ID_NCBI(se_houver)>`` — "if there is one" — but the parser
+    required six fields and raised on every epitope from a predictor that reports no accession,
+    rejecting a whole file the convention allows.
+    """
+    path = tmp_path / "epitopes.fasta"
+    path.write_text(">E_DENV1_OTHER_2_7\nKTAYIA\n", encoding="utf-8")
+
+    result = others.fasta_epitopes(path, 0, 0)
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["Protein"] == "E"
+    assert row["Specie"] == "DENV1"
+    assert row["Method"] == "OTHER"
+    assert row["ID_Sequence"] == ""          # absent, not borrowed from the position fields
+    assert row["Initial Position"] == "2"
+    assert row["Final Position"] == "7"
+    assert row["Peptide Sequence"] == "KTAYIA"
+
+
 def test_poa1_can_report_no_epitopes_after_filtering(tmp_path):
     path = tmp_path / "proteins.fasta"
     path.write_text(">E_DENV1_ref\nMKTAYIA\n", encoding="utf-8")
