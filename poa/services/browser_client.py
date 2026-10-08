@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Optional
 
-from ..logging_conf import get_logger
+from ..logging_conf import TAG_NOTE, get_logger
 from .base import Cache, ServiceError, ServiceResult, ServiceUnavailable, cached_call
 
 logger = get_logger("browser")
@@ -70,7 +70,7 @@ def submit_dtu_form(
         ServiceError: submission ran but no result could be extracted.
     """
     sync_playwright = _require_playwright()
-    logger.info("Browser automation: submitting to %s", url)
+    logger.info("%s service/browser | submitting to %s", TAG_NOTE, url)
     try:
         with sync_playwright() as p:
             try:

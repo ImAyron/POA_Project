@@ -29,9 +29,11 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from Bio import SeqIO
 
 from ..core.parsers.conservancy import operator_family, percent_column, write_metadata
-from ..logging_conf import get_logger
+from ..logging_conf import get_logger, log_step
 
-logger = get_logger("conservancy")
+# distinct from the parser's 'poa.conservancy': both modules log about conservancy, and with the
+# same name their lines were indistinguishable in the output
+logger = get_logger("conservancy_client")
 
 #: Operators the analysis accepts: conserved (``>=``) and unique (``<``).
 OPERATORS = (">=", "<")
@@ -227,39 +229,43 @@ def run_conservancy_for_dir(
             continue
         specie = fname[: -len("_epitopes.fasta")].upper()
 
-        if explicit.get(specie):
-            pairs, origin = explicit[specie], "conjunto próprio da espécie"
-        elif by_specie.get(specie):
-            pairs, origin = by_specie[specie], f"{len(by_specie[specie])} proteína(s) de {specie}"
-        else:
-            pairs, origin = protein_pairs, "conjunto completo (sem correspondência por espécie)"
-            if len(by_specie) > 1:
-                logger.warning(
-                    "%s: no protein of species '%s' in the comparison set (species found: %s). "
-                    "Falling back to the full set — the identities will mix species.",
-                    fname, specie, ", ".join(sorted(by_specie)),
+        # One stage per species: each is an independent comparison, and when one of them is the
+        # one that came out wrong, the log has to say which.
+        with log_step(logger, f"service/conservancy/{specie}") as step:
+            if explicit.get(specie):
+                pairs, origin = explicit[specie], "conjunto próprio da espécie"
+            elif by_specie.get(specie):
+                pairs, origin = by_specie[specie], f"{len(by_specie[specie])} proteína(s) de {specie}"
+            else:
+                pairs, origin = protein_pairs, "conjunto completo (sem correspondência por espécie)"
+                if len(by_specie) > 1:
+                    step.warn(
+                        "no protein of species '%s' in the comparison set (species found: %s). "
+                        "Falling back to the full set — the identities will mix species.",
+                        specie, ", ".join(sorted(by_specie)),
+                    )
+
+            # With a single protein to compare against, every epitope matches it (the epitope was
+            # predicted ON that protein), so the percent column is 100% whatever the threshold is.
+            # Silently reporting "100% conserved" is the failure this warning exists to surface.
+            if len(pairs) < 2:
+                step.warn(
+                    "the comparison set has %d protein(s), so the %s%g%% threshold cannot "
+                    "discriminate — every epitope will come out at 100%%. Supply a diversity set "
+                    "(e.g. the species' world set) for a meaningful conservancy.",
+                    len(pairs), operator, threshold,
                 )
 
-        # With a single protein to compare against, every epitope matches it (the epitope was
-        # predicted ON that protein), so the percent column is 100% whatever the threshold is.
-        # Silently reporting "100% conserved" is the failure this warning exists to make visible.
-        if len(pairs) < 2:
-            logger.warning(
-                "%s: the comparison set for '%s' has %d protein(s), so the %s%g%% threshold cannot "
-                "discriminate — every epitope will come out at 100%%. Supply a diversity set "
-                "(e.g. the species' world set) for a meaningful conservancy.",
-                fname, specie, len(pairs), operator, threshold,
-            )
-
-        src = os.path.join(poa1_conservancy_dir, fname)
-        epitopes = _read_fasta_pairs(src)
-        rows = conservancy_rows(epitopes, pairs, threshold, operator)
-        csv_text = rows_to_csv(rows, csv_columns(operator, threshold))
-        out_name = fname.replace("_epitopes.fasta", "_conservancy.csv")
-        out_path = os.path.join(out_dir, out_name)
-        with open(out_path, "w", encoding="utf-8", newline="") as fh:
-            fh.write(csv_text)
-        logger.info("Conservancy CSV written: %s (%s vs %s)", out_path, specie, origin)
+            src = os.path.join(poa1_conservancy_dir, fname)
+            epitopes = _read_fasta_pairs(src)
+            rows = conservancy_rows(epitopes, pairs, threshold, operator)
+            csv_text = rows_to_csv(rows, csv_columns(operator, threshold))
+            out_name = fname.replace("_epitopes.fasta", "_conservancy.csv")
+            out_path = os.path.join(out_dir, out_name)
+            with open(out_path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(csv_text)
+            step.result(epitopes=len(epitopes), proteins=len(pairs), csv=out_name)
+            step.detail("comparison set: %s", origin)
         written.append(out_path)
         species_meta[specie] = {
             "csv": out_name,

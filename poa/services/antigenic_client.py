@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 from Bio import SeqIO
 
-from ..logging_conf import get_logger
+from ..logging_conf import get_logger, log_step
 from .base import Cache, ServiceError, ServiceResult, ServiceUnavailable, cached_call
 
 logger = get_logger("antigenic")
@@ -102,9 +102,12 @@ def predict(fasta_path: str, minlen: int = 6, emboss_bin: str = "antigenic",
     with open(fasta_path, encoding="utf-8", errors="replace") as fh:
         fasta_content = fh.read()
     params = {"minlen": minlen}
-    logger.info("Running EMBOSS antigenic (minlen=%s) on %s", minlen, fasta_path)
-    return cached_call(
-        cache, "antigenic", "emboss-6.6", params, [fasta_content],
-        lambda: run_antigenic(fasta_path, minlen, emboss_bin, timeout),
-        source="local", ext="gff", use_cache=use_cache,
-    )
+    with log_step(logger, "service/emboss-antigenic") as step:
+        step.note("input=%s minlen=%s", fasta_path, minlen)
+        result = cached_call(
+            cache, "antigenic", "emboss-6.6", params, [fasta_content],
+            lambda: run_antigenic(fasta_path, minlen, emboss_bin, timeout),
+            source="local", ext="gff", use_cache=use_cache,
+        )
+        step.result(source=result.source, bytes=len(result.content or ""))
+    return result
