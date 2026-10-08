@@ -24,13 +24,19 @@ def fresh_logging(monkeypatch):
     """A clean ``poa`` logger per test — the configuration is process-global by design."""
     logger = logging.getLogger("poa")
     saved_handlers, saved_level = list(logger.handlers), logger.level
-    logger.handlers = []
+    # ``propagate`` is part of the state to restore, not just the handlers. setup_logging turns it
+    # off for good, and pytest's caplog reacts to a non-propagating logger by attaching its own
+    # handlers directly to it — which are StreamHandler subclasses, so they land in the counts
+    # these tests make. Leaving it off here made the handler assertions depend on whether an
+    # earlier test file had already configured logging.
+    saved_propagate = logger.propagate
+    logger.handlers, logger.propagate = [], True
     monkeypatch.setattr(logging_conf, "_CONFIGURED", False)
     monkeypatch.setattr(logging_conf, "_FILE_HANDLERS", {})
     monkeypatch.delenv("POA_LOG_LEVEL", raising=False)
     monkeypatch.delenv("POA_LOG_FILE", raising=False)
     yield logger
-    logger.handlers, logger.level = saved_handlers, saved_level
+    logger.handlers, logger.level, logger.propagate = saved_handlers, saved_level, saved_propagate
 
 
 # --------------------------------------------------------------------------- stage boundaries
@@ -210,6 +216,30 @@ def test_switching_the_log_file_stops_writing_to_the_previous_one(fresh_logging,
     assert "belongs to B" in second.read_text(encoding="utf-8")
     files = [h for h in fresh_logging.handlers if isinstance(h, logging.FileHandler)]
     assert len(files) == 1, "o handler anterior precisa ser removido, não apenas somado"
+
+
+def test_rebinding_the_same_log_file_keeps_it_at_debug(fresh_logging, tmp_path):
+    """
+    The GUI's ``setup_logging()`` runs at module level, so Streamlit re-runs it on every click.
+
+    Without a target of its own that call used to put the logger back at the console level, and
+    ``use_log_file`` returned early for a path it was already recording — so the per-analysis log
+    kept only the DEBUG lines written before the user's first interaction. The sequence below is
+    exactly what one rerun does.
+    """
+    target = tmp_path / "analysis" / "poa.log"
+    setup_logging()
+    use_log_file(str(target))
+    logger = get_logger("test")
+    logger.debug("detail from the binding run")
+
+    setup_logging()                   # the rerun: no log_file argument, console level only
+    use_log_file(str(target))
+    logger.debug("detail after a rerun")
+
+    written = target.read_text(encoding="utf-8")
+    assert "detail from the binding run" in written
+    assert "detail after a rerun" in written, "o rerun do Streamlit silenciou o DEBUG do arquivo"
 
 
 def test_unwritable_log_file_warns_and_lets_the_run_continue(fresh_logging, tmp_path, caplog):

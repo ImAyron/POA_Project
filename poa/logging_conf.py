@@ -80,12 +80,26 @@ def setup_logging(level: Optional[int] = None, log_file: Optional[str] = None) -
         _CONFIGURED = True
 
     # The logger itself must pass everything the file handler may want, so it sits at the lowest
-    # level in use; each handler then filters for itself.
+    # level in use; each handler then filters for itself. The file destination is bound first so
+    # the level is computed against the handlers that are actually attached.
     target = log_file or os.environ.get("POA_LOG_FILE") or None
-    logger.setLevel(min(resolved, logging.DEBUG) if target else resolved)
     if target:
         use_log_file(target)
+    logger.setLevel(_effective_level(resolved))
     return logger
+
+
+def _effective_level(console_level: int) -> int:
+    """
+    The level the ``poa`` logger itself must sit at, given the handlers attached to it.
+
+    The logger gates every handler below it, so while a file handler is recording at DEBUG the
+    logger has to pass DEBUG whatever the console is set to. This is recomputed rather than set
+    once because the GUI's module-level ``setup_logging()`` runs again on *every* Streamlit
+    rerun — that is, on every interaction — and a plain ``setLevel(resolved)`` there would raise
+    the logger back to INFO behind a file handler that is still asking for DEBUG.
+    """
+    return min(console_level, logging.DEBUG) if _FILE_HANDLERS else console_level
 
 
 def use_log_file(path: str) -> Optional[logging.Handler]:
@@ -103,9 +117,14 @@ def use_log_file(path: str) -> Optional[logging.Handler]:
     left in place.
     """
     key = os.path.abspath(path)
-    if key in _FILE_HANDLERS:
-        return _FILE_HANDLERS[key]
     logger = logging.getLogger("poa")
+    if key in _FILE_HANDLERS:
+        # Already recording here, but the level is re-asserted: the GUI calls this on every rerun,
+        # right after a ``setup_logging()`` that may have raised the logger back to the console
+        # level. Returning without this is how the per-analysis log quietly lost its DEBUG lines
+        # after the first interaction.
+        logger.setLevel(logging.DEBUG)
+        return _FILE_HANDLERS[key]
     try:
         os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
         handler = logging.FileHandler(key, encoding="utf-8")
