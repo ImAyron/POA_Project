@@ -22,7 +22,16 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate   |   Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
 ```
-Extras que não são pacotes pip ou são pesados (instale apenas se quiser aquela automação):
+
+Esse único comando já instala **tudo que o fluxo principal usa**, inclusive as bibliotecas da
+interface — `streamlit` (a interface), `plotly` (os gráficos) e **`py3Dmol`** (o visualizador 3D
+da etapa 7). Não há passo manual para nenhuma delas: se você instalou pelo `requirements.txt`, a
+visualização 3D já funciona. O `py3Dmol` também precisa de **internet no momento de visualizar**,
+porque a biblioteca JavaScript que ele usa vem de um CDN — veja
+[Visualização dos epítopos](#visualização-dos-epítopos-etapa-7).
+
+Extras que **não** são pacotes pip, ou são pesados demais para a instalação básica (instale apenas
+se quiser aquela automação):
 * **pyTMHMM** (topologia do POA2): instalação separada em Linux/WSL conforme
   [`TESTING_WSL.md`](TESTING_WSL.md). A instalação básica permite usar a GUI, o POA1 e as prévias.
 * **EMBOSS `antigenic`** (substitui o site PAP/IMED, que saiu do ar; mesmo método Kolaskar–Tongaonkar):
@@ -63,10 +72,38 @@ python -m poa.cli.import_realdata --pred-dir <5_...> --world-dir <2_...> \
 Em todos os casos, se um serviço estiver indisponível o pipeline registra uma mensagem clara e
 permite o upload manual do arquivo de resultado, preservando o comportamento semiautomático original.
 
-**Visualização** (etapa 7 da interface): mapa 2D dos epítopos ao longo da sequência — uma trilha por
-proteína/espécie, colorida por método de predição — e visualizador 3D sobre uma estrutura `.pdb`
-enviada pelo usuário, com os epítopos destacados (py3Dmol / 3Dmol.js; a renderização 3D requer
-internet, e a numeração de resíduos do PDB precisa corresponder às posições das predições).
+### Visualização dos epítopos (etapa 7)
+
+Duas visualizações, com requisitos bem diferentes:
+
+**Mapa 2D** — os epítopos ao longo da sequência, uma trilha por proteína/espécie, colorida por
+método de predição. Usa apenas Plotly, que já vem no `requirements.txt`. Funciona offline e está
+sempre disponível quando o POA1 produziu epítopos.
+
+**Estrutura 3D** — os epítopos destacados em vermelho sobre uma estrutura `.pdb` que você envia.
+Depende de **`py3Dmol`**, que é a camada Python sobre a biblioteca JavaScript **3Dmol.js**. O
+py3Dmol não renderiza nada por conta própria: ele monta um HTML que carrega o 3Dmol.js e manda o
+navegador desenhar.
+
+> **O `py3Dmol` faz parte do `requirements.txt`** — ele é instalado junto com o resto pelo
+> `pip install -r requirements.txt`, **não** é um extra de instalação separada como o pyTMHMM ou
+> o EMBOSS. Se o seu ambiente foi montado antes de o visualizador 3D existir, ou instalando
+> pacote a pacote, rode `pip install -r requirements.txt` de novo para completá-lo —
+> ou, só para este: `pip install py3Dmol`.
+
+Três coisas decorrem desse desenho e valem saber antes de usar:
+
+| Requisito | Por quê | O que acontece se faltar |
+|---|---|---|
+| **`py3Dmol` instalado** | É importado só na hora de renderizar, para que o resto da interface e os testes funcionem sem ele | A etapa 7 mostra um erro dizendo como instalar; o mapa 2D continua funcionando |
+| **Internet no momento de visualizar** | O 3Dmol.js vem de um CDN, carregado pelo navegador | O painel aparece vazio, **sem mensagem de erro** — nada é levantado do lado do Python |
+| **Numeração de resíduo compatível** | O destaque usa as posições inicial/final dos epítopos como números de resíduo do PDB | O destaque sai deslocado ou ausente, sem erro |
+
+A terceira é a que mais engana. Estruturas experimentais costumam ter *gaps* e começar num resíduo
+que não é o 1 da sequência usada na predição. Se o destaque parecer deslocado, é quase sempre isso
+— confira a numeração do PDB antes de suspeitar das predições.
+
+O py3Dmol é necessário **apenas para a etapa 7**. O POA1, o POA2 e as etapas 1 a 6 não o importam.
 
 **Saída visível em cada etapa:** toda etapa mostra o que produziu, não apenas que executou.
 A **etapa 1** lista o comprimento de cada sequência e os resíduos ambíguos (o `X` que o POA1
@@ -129,6 +166,110 @@ Revisão de código, correções e melhorias propostas: [`REVISAO.md`](REVISAO.m
 > apontando para a mesma pasta do projeto — veja `TESTING_WSL.md` §6.1. Abra **a mesma análise** do
 > lado da WSL e a etapa 5 oferece **"Retomar com estes arquivos"** a partir dos CSVs já gravados
 > nela, sem repetir as etapas 1 a 4.
+
+### Logs da execução
+
+Toda linha que uma execução produz tem a mesma forma:
+
+```
+<TAG> <etapa> | <mensagem>
+```
+
+A **tag** diz que tipo de evento é, a **etapa** diz que parte do backend produziu a linha, e a
+mensagem carrega os fatos. Uma gramática só para todas significa que o log pode ser lido de cima
+a baixo sem saber qual módulo escreveu o quê:
+
+```
+12:12:49 INFO    poa.pipeline  STEP POA1 | start
+12:12:49 INFO    poa.pipeline  NOTE POA1 | methods=b2,x
+12:12:49 INFO    poa.pipeline  STEP POA1/bepipred-2.0 | start
+12:12:49 INFO    poa.pipeline  DONE POA1/bepipred-2.0 | epitopes=11 species=DENV1 elapsed=0.4s
+12:12:49 INFO    poa.pipeline  DONE POA1 | epitopes=19 species=DENV1,DENV2 methods=2 elapsed=1.2s
+12:12:49 WARNING poa.pipeline  WARN POA2/conservancy | no epitope passed the filters
+12:12:49 ERROR   poa.pipeline  FAIL POA2/topology | RuntimeError: pyTMHMM is not installed elapsed=0.0s
+```
+
+| Tag | Significa |
+|---|---|
+| `STEP` | Uma etapa começou |
+| `DONE` | A etapa terminou, com **o que ela produziu** — não só que rodou |
+| `FAIL` | A etapa não terminou, com o tipo e a mensagem da exceção |
+| `NOTE` | Um fato estabelecido dentro da etapa |
+| `WARN` | A execução segue, mas um resultado ficou suspeito |
+| `DATA` | Detalhe por item (arquivo, registro). Só em `DEBUG` |
+
+As etapas são caminhos — `POA1`, `POA1/bepipred-2.0`, `POA2/conservancy`, `POA2/topology`,
+`service/iedb-mhcii` — então dá para filtrar por parte do pipeline:
+
+```bash
+grep 'FAIL'        poa.log    # tudo que não terminou
+grep 'POA2/'       poa.log    # a etapa POA2 inteira, sub-etapas incluídas
+grep 'DONE POA1/'  poa.log    # o que cada método do POA1 produziu
+```
+
+As tags são ASCII de propósito: um console do Windows em página de código legada levanta
+`UnicodeEncodeError` com caracteres fora do ASCII, e uma falha dentro do log é uma falha na
+execução.
+
+Antes, uma etapa que falhava **não deixava nenhuma linha** — na interface o traceback ia para a
+página do Streamlit e o terminal ficava em branco.
+
+Toda análise também grava **`poa.log` na própria pasta**, sempre em `DEBUG`, com o detalhe por
+item e o traceback completo, independente do nível do console. É o que permite explicar um
+resultado depois sem reexecutar, e faz o registro viajar junto dos resultados entre o Windows e o
+Linux. Duas variáveis de ambiente: `POA_LOG_LEVEL` (padrão `INFO`) e `POA_LOG_FILE` (para apontar
+o arquivo em execuções de linha de comando).
+
+> **Novo: ajuda contextual nos campos.** Cada campo não trivial da interface agora tem um **"?"**
+> ao lado do rótulo; passando o mouse, aparece o que é aquele campo, o que colocar nele e — quando
+> não é óbvio — o que dá errado se estiver errado. A atenção maior foi para os três números de
+> conservância que têm nomes parecidos e significados diferentes: o **limiar (`-t`)** é o critério
+> com que a conservância é *calculada*, o **`-m`** é o percentual mínimo de proteínas que precisam
+> ter dado match, e **`imin`/`imax`** são limites sobre a identidade do próprio epítopo. Confundir
+> os três é a forma mais comum de ler um resultado do POA2 como significando outra coisa. Os
+> textos ficam em `poa/gui/help_texts.py`, revisáveis como documentação, separados do layout.
+
+> **Novo: botão "Nova análise" na barra lateral.** Limpa todos os campos e resultados da sessão e
+> cria uma **pasta nova**, voltando à tela de nomear a análise. É o único caminho que zera os
+> formulários: "Trocar de análise" mantém os parâmetros de filtragem de propósito, porque o motivo
+> usual de abrir outra análise é rodar os mesmos parâmetros sobre outros dados. A análise anterior
+> continua gravada em `results/` — nada em disco é apagado, e é justamente a pasta nova que evita
+> que os arquivos de um teste se misturem ao seguinte.
+
+> **Corrigido (perda de dados ao navegar entre etapas):** o Streamlit só renderiza a etapa
+> selecionada, e um campo que não é renderizado perde o valor. Como os filtros do POA2 não eram
+> guardados em lugar nenhum, ir à etapa 4 conferir um CSV e voltar à etapa 5 devolvia tudo a
+> 60/100/60 — sem aviso, apenas o formulário mostrando os padrões de novo. O mesmo valia para os
+> alelos e o comprimento do peptídeo do MHC-II, o modo da etapa 4 e os controles do visualizador
+> 3D. Agora existe uma **política de estado** declarada no topo de `poa/gui/app.py`: todo campo é
+> espelhado numa chave de sessão comum, que o widget lê como padrão e reescreve a cada execução.
+> O mesmo valia para o PDB da etapa 7, que era lido direto do uploader sem ser gravado — agora ele
+> vai para `inputs/` como os demais arquivos e a estrutura continua na tela ao voltar à etapa.
+> Caminhos e resultados continuam sendo descartados ao trocar de análise; os parâmetros de
+> filtragem sobrevivem à troca, porque o motivo usual de abrir outra análise é rodar os mesmos
+> parâmetros sobre outros dados.
+
+> **Corrigido (limiar da etapa 5 preso em 70):** quando os CSVs não declaram com que limiar foram
+> gerados — sem `conservancy_meta.json` e sem o valor no cabeçalho — a etapa 5 caía em
+> `ss.threshold`, que só é o valor da etapa 4 se a etapa 4 rodou **na mesma sessão**. Ao retomar
+> uma análise do disco (o caminho Windows → WSL), a sessão nunca passou pela etapa 4 e o valor era
+> o default inicial de 70: o POA2 aplicava 70 a dados calculados com outro limiar. Agora a etapa 5
+> **pede** o limiar e o critério nesse caso, e aplica o que você informar; e retomar uma análise
+> adota o limiar gravado junto dos CSVs em vez de deixar a sessão em 70. Quando os CSVs declaram o
+> limiar, o comportamento é o mesmo de antes — o dado continua vencendo o formulário.
+
+> **Corrigido (outros preditores sem ID do NCBI):** o parser do `-x` exigia seis campos no
+> cabeçalho e levantava erro em qualquer arquivo cujos epítopos não trouxessem um número de
+> acesso — embora a seção 3.1.1.5 documente o ID como opcional (`se_houver`). Um cabeçalho de
+> cinco campos (`Proteína_Espécie_Método_Início_Fim`) agora é aceito, com `ID_Sequence` vazio, e
+> a mensagem de erro descreve as duas formas válidas.
+
+> **Corrigido (tabela do POA2 na etapa 5):** a seção "Saída do POA2" exibia o resultado da última
+> execução bem-sucedida sempre que existia um. Se você mudava um parâmetro e a execução falhava —
+> ou se simplesmente não reexecutava — a tabela antiga ficava logo abaixo de um funil já
+> recalculado com os valores novos, sem nada indicando qual era qual. Agora a execução descarta o
+> resultado anterior antes de começar, e uma tabela que não corresponde aos parâmetros na tela vem
+> marcada como de execução anterior.
 
 > **Corrigido (topologia do POA2):** `tmhmmAnalysis` preenchia as colunas `Portion_*` com um valor
 > por *registro casado* do `-f`, não por epítopo. Um `-f` com registros redundantes fazia cada

@@ -9,6 +9,19 @@
 em [`REVISAO.md`](REVISAO.md). Os números abaixo registram a entrega anterior; o PDF também
 é um registro anterior e não foi regenerado nesta revisão.
 
+**Revisão de 08/10/2026** — detalhada em [`REVISAO.md`](REVISAO.md):
+
+* **Correções:** cabeçalho sem ID do NCBI nos outros preditores; tabela do POA2 remanescente de
+  execução anterior na etapa 5; limiar preso em 70 quando os CSVs não o declaram; retomada de
+  análise não restaurando limiar e critério.
+* **Política de estado da interface:** campos deixam de ser perdidos ao navegar entre etapas, e um
+  botão **"Nova análise"** passa a limpar tudo e criar uma pasta nova.
+* **Ajuda contextual:** 34 textos em `poa/gui/help_texts.py`, exibidos como "?" ao lado dos campos
+  não triviais.
+* **Logs:** gramática `<TAG> <etapa> | <mensagem>` com fronteiras de etapa, contagens, registro de
+  erro e `poa.log` por análise.
+* **Documentação:** seção nova sobre a visualização 3D e a dependência `py3Dmol`.
+
 ---
 
 ## 1. Resumo executivo
@@ -383,6 +396,19 @@ Suíte com **143 testes**, todos passando (`pytest`, configuração em `pytest.i
 | `tests/test_viz.py` | mapa 2D e geração do HTML do visualizador 3D |
 | `tests/test_realdata_import.py` | adaptador dos arquivos originais da pesquisa |
 
+Acrescentados depois desta entrega (ver [`REVISAO.md`](REVISAO.md) para a contagem atual):
+
+| Arquivo | Cobertura |
+|---|---|
+| `tests/test_multispecies.py` | análise de várias espécies na mesma execução |
+| `tests/test_runs.py` | uma pasta por análise, nomeação e isolamento |
+| `tests/test_step_outputs.py` | prévias e funil por etapa da interface |
+| `tests/test_gui_app_runs.py`, `test_gui_app_threshold.py` | interface dirigida por `AppTest` |
+| `tests/test_review_regressions.py` | regressões encontradas em revisão de código |
+| `tests/test_gui_state.py` | política de estado: campos sobrevivendo à navegação |
+| `tests/test_gui_help.py` | ajuda contextual dos campos |
+| `tests/test_logging.py` | gramática das mensagens, fronteiras de etapa e arquivo de log |
+
 ```bash
 .venv/Scripts/python.exe -m pytest      # Windows
 python -m pytest                        # Linux/WSL
@@ -403,6 +429,19 @@ python -m pytest                        # Linux/WSL
 * **`README.md`** — nova seção 0 documentando a camada de automação, a GUI, a instalação dos
   extras e o status por ferramenta.
 * **`requirements.txt`** e **`.gitignore`** — criados.
+
+Acrescentados na revisão de 08/10/2026:
+
+* **`REVISAO.md`** — revisões de código, com a tabela problema/correção, o que foi verificado e
+  estava correto, e o que não pôde ser validado neste ambiente.
+* **`COMO_TESTAR.md`** — roteiro manual com números medidos, incluindo o conjunto de exemplo em
+  que o limiar comprovadamente muda o resultado.
+* **`poa/gui/help_texts.py`** — os textos da ajuda contextual da interface, mantidos fora do
+  layout para serem revisáveis como documentação.
+* **`README.md`** — seções novas sobre os **logs da execução** (a gramática `<TAG> <etapa> |
+  <mensagem>`, as seis tags e como filtrar por etapa) e sobre a **visualização dos epítopos**,
+  esta documentando a dependência `py3Dmol`, a necessidade de internet para o CDN do 3Dmol.js e a
+  correspondência de numeração de resíduo que o destaque exige.
 
 ---
 
@@ -436,7 +475,7 @@ Esta é a garantia central da entrega:
 | EMBOSS, BepiPred-3.0, Playwright | Não instalados na máquina de desenvolvimento; esses caminhos não puderam ser verificados em execução real no Windows. |
 | DENV3 | Não processável enquanto o resíduo ambíguo `X` na referência não for resolvido a montante. |
 | Visualização 3D | Depende de internet (3Dmol.js via CDN) e de numeração de resíduos do PDB compatível com as posições das predições. |
-| Branch | `feature/viz-realdata` ainda **não foi enviada** ao repositório remoto. |
+| Branch | `feature/viz-realdata` está publicada em `origin` e sincronizada com o local. |
 
 ---
 

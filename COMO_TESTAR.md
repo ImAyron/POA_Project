@@ -15,15 +15,20 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-> O `pyTMHMM` é instalado separadamente, conforme `TESTING_WSL.md`, para evitar que seu build
-> nativo bloqueie a instalação básica. Sem ele, as etapas 1 a 4 e o painel de filtros da etapa 5
-> funcionam; o botão de executar a topologia fica desabilitado.
+> O `pyTMHMM` é o **único** pacote instalado separadamente (conforme `TESTING_WSL.md`), porque seu
+> build nativo bloquearia a instalação básica no Windows. Sem ele, as etapas 1 a 4 e o painel de
+> filtros da etapa 5 funcionam; o botão de executar a topologia fica desabilitado. Todo o resto —
+> inclusive o `py3Dmol` da visualização 3D — vem no `requirements.txt`.
 
 Confira:
 
 ```powershell
-.venv\Scripts\python.exe -c "import pandas, Bio, streamlit; print('ok')"
+.venv\Scripts\python.exe -c "import pandas, Bio, streamlit, plotly, py3Dmol; print('ok')"
 ```
+
+Se esse comando falhar em `py3Dmol`, o ambiente foi montado antes de o visualizador 3D existir ou
+pacote a pacote; rode o `pip install -r requirements.txt` de novo. As etapas 1 a 6 funcionam sem
+ele — só a estrutura 3D da etapa 7 não renderiza.
 
 ---
 
@@ -147,3 +152,48 @@ nos seus dados fazem sentido biológico. Para isso:
    aparecer, o resultado de conservância daquela espécie não significa nada ainda — falta o
    conjunto de diversidade (*world set*), não é defeito do código.
 4. Compare com a análise anterior: como cada uma tem a sua pasta, as duas coexistem.
+
+---
+
+## 7. Ler o log de uma execução
+
+Toda análise grava um `poa.log` na própria pasta, sempre em `DEBUG` — mesmo quando o terminal está
+em `INFO`. É o primeiro lugar a olhar quando um resultado não bate com o esperado, porque registra
+o que cada etapa produziu, e não apenas que ela rodou.
+
+As linhas têm a forma `<TAG> <etapa> | <mensagem>`, então dá para filtrar por parte do pipeline:
+
+```powershell
+# o que cada método do POA1 selecionou
+Select-String 'DONE POA1/' "results\08102026-MEU_TESTE\poa.log"
+
+# tudo que não terminou
+Select-String 'FAIL' "results\08102026-MEU_TESTE\poa.log"
+
+# a etapa POA2 inteira, sub-etapas incluídas
+Select-String 'POA2/' "results\08102026-MEU_TESTE\poa.log"
+```
+
+Três verificações que valem fazer no log antes de confiar num resultado:
+
+1. **`DONE POA1 | epitopes=N`** — confira se `N` é o número que você esperava. Zero aqui significa
+   que os filtros de tamanho da etapa 1 descartaram tudo.
+2. **`species=`** nas linhas `DONE` — se aparecer uma espécie que você não reconhece, ou faltar
+   uma que deveria estar, é cabeçalho fora da convenção `Proteína_Espécie_ID`.
+3. **Linhas `WARN`** — cada uma marca um resultado que ficou suspeito, não um erro. A mais
+   importante é a do conjunto de comparação com menos de duas proteínas: a conservância daquela
+   espécie sai 100% com qualquer limiar.
+
+Para ver o detalhe por item também no terminal, suba o nível:
+
+```powershell
+$env:POA_LOG_LEVEL = "DEBUG"
+streamlit run poa/gui/app.py
+```
+
+Na linha de comando, `POA_LOG_FILE` aponta o arquivo, já que não há pasta de análise:
+
+```powershell
+$env:POA_LOG_FILE = "poa1.log"
+python POA1_v1.0.py -f proteins.fasta -d results -b3 bepipred3.fasta
+```
