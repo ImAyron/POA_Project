@@ -77,6 +77,7 @@ def setup_logging(level: Optional[int] = None, log_file: Optional[str] = None) -
         handler.setLevel(resolved)
         logger.addHandler(handler)
         logger.propagate = False
+        _capture_warnings()
         _CONFIGURED = True
 
     # The logger itself must pass everything the file handler may want, so it sits at the lowest
@@ -87,6 +88,28 @@ def setup_logging(level: Optional[int] = None, log_file: Optional[str] = None) -
         use_log_file(target)
     logger.setLevel(_effective_level(resolved))
     return logger
+
+
+def _capture_warnings() -> None:
+    """
+    Route ``warnings.warn`` into this logger instead of letting it vanish.
+
+    :mod:`poa.core.topology` reports its scientific caveats with ``warnings.warn`` — an epitope
+    matching more than one reference record, or declared coordinates that do not agree with where
+    the sequence actually sits. Python prints those to stderr once per call site and never
+    repeats them, so in the GUI they went nowhere at all: Streamlit does not show stderr, and the
+    per-analysis ``poa.log`` never saw them. A caveat nobody can read is the same as no caveat.
+
+    ``captureWarnings`` sends them to the ``py.warnings`` logger; attaching it to ``poa``'s
+    handlers puts them in the same file and the same format as everything else.
+    """
+    logging.captureWarnings(True)
+    warnings_logger = logging.getLogger("py.warnings")
+    warnings_logger.handlers = []
+    warnings_logger.propagate = False
+    for handler in logging.getLogger("poa").handlers:
+        warnings_logger.addHandler(handler)
+    warnings_logger.setLevel(logging.WARNING)
 
 
 def _effective_level(console_level: int) -> int:
@@ -135,12 +158,17 @@ def use_log_file(path: str) -> Optional[logging.Handler]:
     handler.setFormatter(logging.Formatter(_FILE_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
     handler.setLevel(logging.DEBUG)
 
+    warnings_logger = logging.getLogger("py.warnings")
     for old_key, old in list(_FILE_HANDLERS.items()):
         logger.removeHandler(old)
+        warnings_logger.removeHandler(old)
         old.close()
         del _FILE_HANDLERS[old_key]
 
     logger.addHandler(handler)
+    # The per-analysis log is where the scientific caveats belong, and ``warnings.warn`` lines
+    # are caveats; without this they would reach the console and stop there.
+    warnings_logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     _FILE_HANDLERS[key] = handler
     logger.info("%s logging | log file: %s", TAG_NOTE, key)
