@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -19,8 +20,11 @@ import pandas as pd
 
 from ..core import pipeline
 from ..core.models import STANDARD_COLUMNS
+from ..logging_conf import get_logger
 from ..services import realdata_import
 from ..services.cache import Cache
+
+logger = get_logger("gui")
 
 
 #: repository root — ``poa/gui/backend.py`` -> ``poa/gui`` -> ``poa`` -> repo
@@ -231,6 +235,70 @@ def open_run(root: Path, path: Path) -> WorkContext:
     """Re-open an existing analysis (legacy tree included), sharing the root-level cache."""
     root, path = Path(root), Path(path)
     return WorkContext(path, cache_root=root / "cache")
+
+
+def delete_run(root: Path, path: Path) -> Dict[str, object]:
+    """
+    Permanently delete one analysis folder and everything inside it.
+
+    This removes predictions, conservancy CSVs, POA2 spreadsheets and the run's log. There is no
+    undo and nothing is moved to a recycle bin, so the caller must have asked first — the guards
+    here only stop the mistakes a confirmation dialog cannot catch:
+
+    * the path has to be **inside** ``root``, so a bad argument cannot walk out of the results
+      tree and delete something else;
+    * it must look like an analysis (``run.json`` or the usual subfolders), never an arbitrary
+      directory someone happens to have under ``results/``;
+    * ``root`` itself and the shared ``cache/`` are refused outright — the cache belongs to every
+      analysis, not to this one.
+
+    Args:
+        root: the results root.
+        path: the analysis folder to delete.
+
+    Returns:
+        ``{"folder", "files", "bytes"}`` describing what was removed.
+
+    Raises:
+        ValueError: the path is outside ``root``, is ``root``/``cache``, or is not an analysis.
+        FileNotFoundError: there is nothing at ``path``.
+    """
+    root, path = Path(root).resolve(), Path(path).resolve()
+
+    if not path.exists():
+        raise FileNotFoundError(f"Não existe nada em {path}.")
+    if not path.is_dir():
+        raise ValueError(f"{path} não é uma pasta.")
+    if path == root:
+        raise ValueError("A pasta raiz de resultados não pode ser apagada — só uma análise "
+                         "de cada vez.")
+    if root not in path.parents:
+        raise ValueError(f"{path} está fora de {root}; recusado por segurança.")
+    if path.name == "cache":
+        raise ValueError("A pasta 'cache' é compartilhada por todas as análises e não pertence "
+                         "a nenhuma delas.")
+    if not (path / RUN_METADATA_FILENAME).exists() and not _is_run_tree(path):
+        raise ValueError(f"{path.name} não parece uma análise (sem {RUN_METADATA_FILENAME} nem "
+                         f"as subpastas do pipeline). Apague-a pelo explorador de arquivos se "
+                         f"for mesmo isso que você quer.")
+
+    files = [p for p in path.rglob("*") if p.is_file()]
+    total = sum(p.stat().st_size for p in files)
+    summary = {"folder": path.name, "files": len(files), "bytes": total}
+
+    shutil.rmtree(path)
+    logger.info("analysis deleted: %s (%d file(s), %s)", path.name, len(files),
+                human_size(total))
+    return summary
+
+
+def human_size(nbytes: float) -> str:
+    """Byte count as a short human-readable string."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if nbytes < 1024 or unit == "GB":
+            return f"{nbytes:.0f} {unit}" if unit == "B" else f"{nbytes:.1f} {unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f} GB"
 
 
 # --------------------------------------------------------------------------- argument builders
@@ -815,3 +883,36 @@ def nonconforming_antigen_keys(path: str) -> List[str]:
     from ..core.parsers.bepipred import BP2_ANTIGEN_KEY
 
     return [k for k in realdata_import.antigen_keys(path) if not re.match(BP2_ANTIGEN_KEY, str(k))]
+
+
+def reference_sequence(ctx: "WorkContext", protein: str, specie: str) -> Optional[Dict[str, str]]:
+    """
+    Find the sequence the predictions for one protein/species ran on.
+
+    Epitope positions are relative to this sequence, so it is what a structure has to be
+    compared against before its residues can be colored. Searches the analysis' own ``inputs/``
+    for a record whose header reads ``Protein_Specie_ID``.
+
+    Parameters:
+        ctx: the analysis folder.
+        protein: field 0 of the header.
+        specie: field 1 of the header.
+
+    Returns:
+        ``{"header", "sequence", "path"}`` for the first match, or None when no input FASTA
+        carries that protein/species — in which case the structure cannot be verified and the
+        caller must say so rather than highlight anything.
+    """
+    from Bio import SeqIO
+
+    for path in sorted(ctx.inputs_dir.glob("*.fasta")):
+        try:
+            records = list(SeqIO.parse(str(path), "fasta"))
+        except Exception:                      # noqa: BLE001 - a malformed input is not fatal here
+            continue
+        for rec in records:
+            parts = str(rec.id).upper().split("_")
+            if len(parts) > 1 and parts[0] == protein.upper() and parts[1] == specie.upper():
+                return {"header": str(rec.id), "sequence": str(rec.seq).upper(),
+                        "path": str(path)}
+    return None

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 # When launched via `streamlit run poa/gui/app.py`, Streamlit puts this file's directory on
 # sys.path (not the project root), so `import poa` would fail. Add the repo root explicitly.
@@ -32,14 +33,17 @@ def _embed_html(html: str, height: int) -> None:
     render(html, height=height)
 from Bio import SeqIO
 
+from poa.core import structure_map
 from poa.core.parsers import conservancy as conservancy_parser
 from poa.gui import backend, viz
 from poa.gui.help_texts import HELP
 from poa.logging_conf import use_log_file, setup_logging
+from poa.core import dbsearch
 from poa.services import (
     antigenic_client,
     bepipred_client,
     conservancy_client,
+    database_client,
     mhcii_client,
     tmhmm_client,
 )
@@ -98,6 +102,14 @@ def _init_state():
     ss.setdefault("params_mhcii", {})      # step 2: IEDB alleles and peptide length
     ss.setdefault("params_viz", {})        # step 7: 3D representation controls
     ss.setdefault("pdb_path", None)        # step 7: the uploaded structure, kept by path
+    # Step 1, POA0 search. Each answer narrows the next question, so the intermediate listings
+    # are kept: re-querying UniProt on every rerun would make the form unusable.
+    ss.setdefault("poa0_taxa", [])         # candidate organisms for the typed name
+    ss.setdefault("poa0_taxon", None)      # the chosen one
+    ss.setdefault("poa0_proteins", [])     # its protein entries
+    ss.setdefault("poa0_regions", [])      # regions of the chosen protein
+    ss.setdefault("poa0_entry", None)      # the chosen protein's UniProt entry, to avoid refetching
+    ss.setdefault("poa0_structures", [])   # structures covering the chosen protein
     ss.setdefault("cons_mode_local", True)  # step 4: local reimplementation vs. manual CSV upload
     # one *list* of files per method (b2/b3/p/n/x) so several species can be analysed together;
     # 'm' (MHC-II) stays a single directory of Protein_Specie.html files
@@ -177,8 +189,11 @@ def _full_reset():
     includes the step selector, and leaves ``run_path`` unset so the session lands back on the
     analysis picker and a *new folder* is created there.
 
-    Nothing on disk is touched: the previous analysis stays in ``results/`` to compare against,
-    and a fresh folder is what keeps its files from mixing into the next test.
+    This function itself touches no files — from the sidebar button the previous analysis stays
+    in ``results/`` to compare against, and a fresh folder is what keeps its files from mixing
+    into the next test. It is also called right after :func:`poa.gui.backend.delete_run`, where
+    the folder is already gone and clearing the state is what stops the session from holding
+    paths into it.
     """
     for key in list(ss.keys()):
         del ss[key]
@@ -249,7 +264,49 @@ def _select_run() -> backend.WorkContext:
                         "continua utilizável onde está — nada foi movido.")
             if st.button("Abrir análise"):
                 _adopt_run(chosen.path)
+            _delete_run_panel(root, chosen)
     st.stop()
+
+
+def _delete_run_panel(root, chosen) -> None:
+    """
+    Delete the selected analysis, behind a confirmation that cannot be clicked through.
+
+    Removing an analysis throws away predictions that took API calls and minutes to produce, and
+    there is no undo — so the confirmation is typing the folder name, not a second button. A
+    button pair is a reflex; typing the name is a decision, and it also makes it impossible to
+    delete a *different* analysis than the one being read about.
+    """
+    with st.expander("🗑️ Apagar esta análise", expanded=False):
+        st.caption(f"Remove a pasta `{chosen.path.name}` e tudo dentro dela — predições, CSVs de "
+                   "conservância, planilhas do POA2 e o log. **Não tem desfazer** e nada vai para "
+                   "a lixeira.")
+        if chosen.legacy:
+            st.info("Esta é a pasta de resultados anterior à convenção datada. Apague-a pelo "
+                    "explorador de arquivos se for mesmo o que você quer.")
+            return
+
+        files = [p for p in chosen.path.rglob("*") if p.is_file()]
+        size = backend.human_size(sum(p.stat().st_size for p in files))
+        st.write(f"**{len(files)} arquivo(s)**, {size} — {chosen.progress}")
+
+        typed = st.text_input(f"Para confirmar, digite `{chosen.path.name}`",
+                              key=f"del_{chosen.path.name}", placeholder=chosen.path.name)
+        match = typed.strip() == chosen.path.name
+        if st.button("Apagar definitivamente", type="primary", disabled=not match,
+                     key=f"delbtn_{chosen.path.name}"):
+            try:
+                removed = backend.delete_run(root, chosen.path)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                st.error(f"Não foi possível apagar: {exc}")
+                return
+            # The deleted folder may be the one this session is bound to, or one it has paths
+            # into; dropping the whole session state is the only way to be sure nothing points
+            # at files that no longer exist.
+            _full_reset()
+            st.success(f"`{removed['folder']}` apagada ({removed['files']} arquivo(s), "
+                       f"{backend.human_size(removed['bytes'])}).")
+            st.rerun()
 
 
 # --------------------------------------------------------------------------- sidebar
@@ -296,8 +353,147 @@ st.title("Pipeline de Otimização de Antígenos (POA)")
 
 
 # =========================================================================== STEP 1
+def _poa0_search_panel():
+    """
+    POA0 inside step 1: find the protein in the databases instead of supplying the FASTA.
+
+    Four questions, each narrowing the next, because none of them has a safe automatic answer —
+    an organism name matches several taxa, a virus has several proteins, and a polyprotein is
+    not itself a target. The intermediate listings live in session state: re-querying UniProt on
+    every Streamlit rerun would make the form unusable.
+
+    Writes through :func:`poa.core.dbsearch.run_poa0`, the same function the command line calls,
+    so the GUI and ``POA0_v1.0.py`` cannot drift apart.
+    """
+    with st.expander("🔎 Não tenho o FASTA — buscar pela espécie (POA0)", expanded=False):
+        st.caption("Busca em UniProt, InterPro, PDBe e RCSB. Precisa de internet. "
+                   "O arquivo gerado já sai no cabeçalho `Proteína_Espécie_ID` e entra "
+                   "direto como `-f`.")
+
+        name = st.text_input("Nome do organismo", key="poa0_name",
+                             placeholder="Oropouche virus")
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            search = st.button("1. Buscar organismo", disabled=not name)
+        with c2:
+            descendants = st.checkbox(
+                "Incluir cepas e isolados (`taxonomy_id`)", key="poa0_desc",
+                help=HELP["poa0_descendants"])
+
+        if search:
+            try:
+                ss.poa0_taxa = dbsearch.list_taxa(name)
+                ss.poa0_taxon = None
+                ss.poa0_proteins, ss.poa0_regions, ss.poa0_structures = [], [], []
+            except (ServiceError, ServiceUnavailable) as exc:
+                st.error(f"Busca falhou: {exc}")
+                return
+            if not ss.poa0_taxa:
+                st.warning(f"Nenhum organismo no UniProt corresponde a “{name}”.")
+
+        if not ss.poa0_taxa:
+            return
+
+        taxon = st.selectbox("2. Qual táxon?", ss.poa0_taxa, format_func=str,
+                             key="poa0_taxon_pick")
+        if st.button("Listar proteínas deste táxon"):
+            try:
+                ss.poa0_taxon = taxon
+                ss.poa0_proteins = dbsearch.list_proteins(
+                    taxon.taxon_id, include_descendants=descendants, limit=25)
+                ss.poa0_regions, ss.poa0_structures = [], []
+            except (ServiceError, ServiceUnavailable) as exc:
+                st.error(f"Não consegui listar as proteínas: {exc}")
+                return
+
+        if not ss.poa0_proteins:
+            return
+
+        st.caption("Ordenadas por: revisada (SwissProt) primeiro, depois as que têm estrutura, "
+                   "depois as mais longas. A primeira raramente é a escolha errada, mas confira — "
+                   "o melhor antígeno nem sempre é a proteína mais bem ranqueada.")
+        protein = st.selectbox("3. Qual proteína?", ss.poa0_proteins, format_func=str,
+                               key="poa0_protein_pick")
+        if st.button("Listar regiões desta proteína"):
+            try:
+                ss.poa0_entry = database_client.get_entry(protein.accession)
+                ss.poa0_regions = database_client.list_regions(protein.accession,
+                                                               entry=ss.poa0_entry)
+                ss.poa0_structures = database_client.list_structures(protein.accession, limit=15)
+            except (ServiceError, ServiceUnavailable) as exc:
+                st.error(f"Não consegui listar as regiões: {exc}")
+                return
+
+        if not ss.poa0_regions:
+            return
+
+        st.caption("Uma poliproteína inteira não é um alvo vacinal; uma de suas proteínas maduras "
+                   "ou domínios é. `Chain` são proteínas maduras (só em entradas SwissProt), "
+                   "`PDB` é o trecho que uma estrutura resolve.")
+        whole = f"(sequência inteira — {protein.length} aa)"
+        options = [whole] + [str(r) for r in ss.poa0_regions]
+        picked = st.selectbox("4. Qual região?", options, key="poa0_region_pick")
+        region = None if picked == whole else ss.poa0_regions[options.index(picked) - 1]
+
+        st.divider()
+        c3, c4 = st.columns(2)
+        with c3:
+            default_name = dbsearch.sanitize_token(region.name if region else protein.name, "PROT")
+            token_name = st.text_input("Campo de proteína no cabeçalho", default_name,
+                                       key="poa0_token_name", help=HELP["poa0_token_name"])
+        with c4:
+            organism = ss.poa0_taxon.scientific_name if ss.poa0_taxon else ""
+            token_specie = st.text_input("Campo de espécie (sigla)",
+                                         dbsearch.species_token(organism),
+                                         key="poa0_token_specie",
+                                         help=HELP["poa0_token_specie"])
+
+        structure_id = ""
+        if ss.poa0_structures:
+            labels = ["(não baixar estrutura)"] + [str(s) for s in ss.poa0_structures]
+            chosen = st.selectbox("Baixar também uma estrutura do RCSB?", labels,
+                                  key="poa0_structure_pick", help=HELP["poa0_structure"])
+            if chosen != labels[0]:
+                structure_id = ss.poa0_structures[labels.index(chosen) - 1].pdb_id
+            st.caption("A estrutura baixada aqui já vem com o mapeamento SIFTS gravado no "
+                       "relatório, que é o que a etapa 7 usa para acertar a numeração dos resíduos.")
+
+        if st.button("⬇️ Gerar o FASTA", type="primary",
+                     disabled=not (token_name and token_specie)):
+            args = SimpleNamespace(
+                s="", a=protein.accession, d=str(ctx.inputs_dir),
+                r=f"{region.start}-{region.end}" if region else "",
+                nome=token_name, sigla=token_specie, estrutura=structure_id,
+                descendentes=descendants, limite=25, l="")
+            try:
+                report = dbsearch.run_poa0(args)
+            except (ServiceError, ServiceUnavailable, SystemExit) as exc:
+                st.error(f"Não consegui gerar o FASTA: {exc}")
+                return
+
+            fasta = report["arquivos"]["fasta"]
+            # Adopted exactly like an upload, so the rest of step 1 — the header table, the
+            # ambiguous-residue check, the merge into -f — treats it identically.
+            if fasta not in ss.ref_raw:
+                ss.ref_raw = list(ss.ref_raw) + [fasta]
+            if report["arquivos"].get("estrutura"):
+                ss.pdb_path = report["arquivos"]["estrutura"]
+
+            st.success(f"`{Path(fasta).name}` gerado: {report['sequencia']['tamanho']} aa, "
+                       f"cabeçalho `{report['cabecalho']}`.")
+            if report["arquivos"].get("estrutura"):
+                info = report["estrutura"]["cabecalho"]
+                st.info(f"Estrutura `{report['estrutura']['pdb_id']}` baixada e já carregada na "
+                        f"etapa 7: {info.get('molecule', '?')} · {info.get('organism', '?')}")
+            for warning in report.get("avisos", []):
+                st.warning(warning)
+            st.caption("Deixe a caixa de inverter cabeçalhos **desmarcada** abaixo: o POA0 já "
+                       "grava no formato `Proteína_Espécie_ID`.")
+
+
 def step_inputs():
     st.header("1 · Proteínas e parâmetros do POA1")
+    _poa0_search_panel()
     st.write("Envie o(s) arquivo(s) FASTA com as proteínas/poliproteínas usadas nas predições "
              "(cabeçalho no formato `Proteína_Espécie_ID`, ex.: `E_DENV1_ref`). "
              "**Para analisar mais de uma espécie**, inclua todas as proteínas — no mesmo FASTA "
@@ -851,13 +1047,17 @@ def step_conservancy():
                     st.warning(f"↳ {sp}: nenhuma proteína dessa espécie no -f — será comparada com "
                                "o conjunto completo (identidades misturam espécies). Envie um "
                                "conjunto próprio ou corrija o FASTA da etapa 1.")
-            # One protein cannot produce a conservancy: the epitope was predicted on it, so it
-            # matches at 100% and the result is 100% for any threshold.
+            # One protein cannot produce a conservancy: matched/total with total = 1 leaves only
+            # 0% and 100%, and which one appears depends on whether that protein is the one the
+            # epitopes were predicted on — not on how conserved anything is.
             if n_comp == 1:
                 st.warning(f"↳ {sp}: com **uma única proteína** de comparação o limiar não "
-                           "discrimina nada — todo epítopo sai com 100% de conservância, qualquer "
-                           "que seja o valor escolhido acima. Envie um conjunto de diversidade "
-                           "(ex.: o *world set* da espécie) para que o limiar tenha efeito.")
+                           "discrimina nada — a conservância só pode dar **0% ou 100%**, e nenhum "
+                           "dos dois significa coisa alguma. Dá 100% se essa proteína for aquela "
+                           "em que os epítopos foram preditos (eles casam consigo mesmos) e 0% "
+                           "caso contrário, por mais parecidas que as sequências sejam — e aí o "
+                           "POA2 descarta tudo e a planilha sai vazia. Envie um conjunto de "
+                           "diversidade (ex.: o *world set* da espécie).")
 
         if st.button("▶️ Calcular conservância (local)", type="primary"):
             with st.status("Calculando conservância…", expanded=True) as status:
@@ -1037,9 +1237,26 @@ def step_poa2():
                           if not info.get("discriminating", True))
             if weak:
                 st.warning("Espécie(s) cujo conjunto de comparação tinha uma única proteína — o "
-                           "limiar não discriminou nada e a conservância saiu 100%: "
-                           + ", ".join(weak) + ". Refaça a etapa 4 com um conjunto de diversidade "
-                           "se estes resultados forem usados.")
+                           "limiar não discriminou nada, e a conservância só podia dar 0% ou "
+                           "100%: " + ", ".join(weak) + ". Refaça a etapa 4 com um conjunto de "
+                           "diversidade se estes resultados forem usados.")
+
+    # Nothing empties this folder, and POA2 merges every CSV under it. A leftover from an earlier
+    # run joins the analysis in silence — the backend logs it, but the log is a file nobody has
+    # open while clicking, so the warning has to be on the page.
+    leftovers = conservancy_parser.stale_csvs(str(ctx.conservancy_csv_dir))
+    if leftovers:
+        st.warning(f"**{len(leftovers)} CSV(s) em `{ctx.conservancy_csv_dir.name}/` não vieram "
+                   f"da última execução da etapa 4** e serão misturados a esta análise: "
+                   + ", ".join(f"`{n}`" for n in leftovers) + ". Apague-os, ou refaça a etapa 4.")
+
+    # The -m the user is about to pick may not be the one that takes effect: the percent column
+    # moves in steps of 100/n, so with a small comparison set a "most of them" value lands on
+    # "all of them". Shown here, next to the field, rather than only in the log.
+    resolucao = conservancy_parser.check_match_resolution(
+        str(ctx.conservancy_csv_dir), float(ss.params_poa2.get("m", 60)))
+    for aviso in resolucao:
+        st.warning(aviso)
 
     # Every widget here reads its default from ss.params_poa2 and is written back below, so
     # navigating to another step and returning restores the form instead of resetting the filters
@@ -1254,23 +1471,73 @@ def step_viz():
     if ss.pdb_path:
         prot, spec = choice.split("|")
         ranges = viz.epitope_ranges(df, protein=prot, specie=spec)
+        pdb_text = Path(ss.pdb_path).read_text(encoding="utf-8", errors="replace")
+
+        # What the file *is*, before it is used as if it were the antigen. A PDB identifier says
+        # nothing on sight, and an unrelated structure produces a confident, meaningless figure.
+        _show_structure_identity(pdb_text, Path(ss.pdb_path).name)
+
+        reference = backend.reference_sequence(ctx, prot, spec)
+        report = None
+        if reference is None:
+            st.warning(
+                f"Não encontrei em `{ctx.inputs_dir.name}/` a sequência de referência de "
+                f"`{prot}_{spec}`, então não dá para conferir se esta estrutura é dessa proteína. "
+                f"Os epítopos serão destacados pelas posições cruas — confira a numeração.")
+        else:
+            report = structure_map.map_epitopes(pdb_text, reference["sequence"], ranges,
+                                                chain=chain or None)
+            ranges = report.ranges
+
         try:
-            html = viz.build_3dmol_view_html(
-                Path(ss.pdb_path).read_text(encoding="utf-8", errors="replace"),
-                ranges,
-                chain=chain or None,
-                base_style=base_style,
-                show_surface=surface,
-            )
-            _embed_html(html, height=520)
-            st.caption(f"{len(ranges)} epítopo(s) de {prot}_{spec} destacado(s) em vermelho "
-                       f"(estrutura: `{Path(ss.pdb_path).name}`). Atenção: a numeração de resíduo "
-                       "do PDB precisa corresponder à posição na sequência usada nas predições "
-                       "(cuidado com gaps/offset).")
+            if report is not None and not report.ok:
+                # Rendering the structure plain is still useful — what is refused is the claim
+                # that these residues are the epitopes.
+                st.error("**Estrutura incompatível com as predições.** " + report.warnings[0])
+                st.caption(f"Comparação: `{reference['header']}` ({len(reference['sequence'])} aa) "
+                           f"× cadeia {report.chain} de `{Path(ss.pdb_path).name}` "
+                           f"({report.structure_length} resíduos observados).")
+                html = viz.build_3dmol_view_html(pdb_text, [], chain=chain or None,
+                                                 base_style=base_style, show_surface=surface)
+                _embed_html(html, height=520)
+                st.caption("Estrutura exibida sem destaque. Envie a estrutura desta proteína, "
+                           "ou gere-a pelo POA0 (`--estrutura`), que busca no RCSB a que "
+                           "corresponde à sequência analisada.")
+            else:
+                html = viz.build_3dmol_view_html(pdb_text, ranges, chain=chain or None,
+                                                 base_style=base_style, show_surface=surface)
+                _embed_html(html, height=520)
+                if report is None:
+                    st.caption(f"{len(ranges)} epítopo(s) de {prot}_{spec} destacado(s) em "
+                               f"vermelho (estrutura: `{Path(ss.pdb_path).name}`).")
+                else:
+                    st.success(f"{len(report.ranges)} epítopo(s) de {prot}_{spec} destacado(s) "
+                               f"em vermelho. {report.summary()}")
+                    for warning in report.warnings:
+                        st.warning(warning)
         except Exception as exc:  # noqa: BLE001 - surface the error to the user, don't crash the app
             st.error(f"Não foi possível renderizar a estrutura: {exc}")
     else:
-        st.info("Envie um arquivo .pdb para ver os epítopos destacados na estrutura 3D.")
+        st.info("Envie um arquivo .pdb para ver os epítopos destacados na estrutura 3D, "
+                "ou use o POA0 (`--estrutura 6H3X`) para baixar a estrutura certa do RCSB.")
+
+
+def _show_structure_identity(pdb_text: str, filename: str) -> None:
+    """Show the molecule, organism and method the structure file declares in its own header."""
+    from poa.services import database_client
+
+    summary = database_client.structure_summary(pdb_text)
+    if not summary:
+        return
+    label = summary.get("molecule") or summary.get("title") or "?"
+    organism = summary.get("organism", "?")
+    details = [f"**{label}**", organism]
+    if summary.get("method"):
+        details.append(summary["method"])
+    if summary.get("resolution"):
+        details.append(summary["resolution"])
+    st.info(f"`{filename}` contém: " + " · ".join(details)
+            + (f" · cadeias {summary['chains']}" if summary.get("chains") else ""))
 
 
 # --------------------------------------------------------------------------- dispatch

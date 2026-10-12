@@ -17,6 +17,31 @@ result as meaning something it does not.
 from __future__ import annotations
 
 HELP = {
+    # ----------------------------------------------------------------- step 1: POA0 search
+    "poa0_descendants": (
+        "Desmarcado, a busca usa `organism_id`, que casa **só** com o táxon exato. Marcado, usa "
+        "`taxonomy_id`, que inclui cepas e isolados descendentes. Para vírus a diferença costuma "
+        "ser de uma ordem de grandeza — vale marcar quando o táxon exato devolve pouca coisa, e "
+        "deixar desmarcado quando você quer a espécie de referência e não os isolados."
+    ),
+    "poa0_token_name": (
+        "O campo de proteína do cabeçalho `Proteína_Espécie_ID` (ex.: `GcHead`). **Não pode "
+        "conter `_`**: o pipeline separa os campos por underscore, então um underscore aqui "
+        "desloca todos os campos seguintes e a espécie passa a ser lida do meio do nome da "
+        "proteína. Pontuação e espaços são removidos automaticamente."
+    ),
+    "poa0_token_specie": (
+        "O campo de espécie do cabeçalho (ex.: `OROV`, `DENV1`). É por ele que o POA2 liga cada "
+        "epítopo à sua sequência de referência, então use a mesma sigla em todas as proteínas da "
+        "mesma espécie. Também não pode conter `_`."
+    ),
+    "poa0_structure": (
+        "Baixa a estrutura escolhida do RCSB e grava junto o mapeamento SIFTS — a correspondência "
+        "exata entre os resíduos da sequência e a numeração que o arquivo usa. É isso que permite "
+        "à etapa 7 destacar os epítopos na posição certa em vez de supor que a estrutura começa "
+        "no resíduo 1. A lista vem ordenada por cobertura da sequência e, em seguida, resolução."
+    ),
+
     # ----------------------------------------------------------------- step 1: proteins & params
     "proteins_fasta": (
         "O conjunto de proteínas sobre o qual os epítopos foram preditos — o `-f` do POA1. "
