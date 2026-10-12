@@ -58,13 +58,30 @@ def csv_columns(operator: str = "<=", threshold=100) -> List[str]:
 CSV_COLUMNS = csv_columns()
 
 
-def max_identity(epitope: str, protein: str) -> float:
-    """Maximum ungapped percent identity of ``epitope`` against any window of ``protein``."""
+def max_identity(epitope: str, protein: str) -> Optional[float]:
+    """
+    Maximum ungapped percent identity of ``epitope`` against any window of ``protein``.
+
+    Returns ``None`` — not ``0.0`` — when the protein is shorter than the epitope, because the
+    two statements are different and conflating them corrupts the result. "0% identical" is
+    evidence that the epitope is absent; "shorter than the epitope" means no window exists, so
+    the protein carries **no evidence either way**.
+
+    Reporting the second as the first was harmless under ``>=`` (0% fails any threshold) but
+    wrong under ``<``: a protein that cannot contain the epitope was counted as proof that the
+    epitope is unique to its source. It also dragged the ``Minimum identity`` column to 0.00%,
+    and POA2's default ``-imin 60`` then dropped the epitope with no message.
+
+    Callers must treat ``None`` as "not comparable" and leave it out of both the counts and the
+    min/max columns; :func:`conservancy_rows` does.
+    """
     epitope = epitope.upper()
     protein = protein.upper()
     L = len(epitope)
-    if L == 0 or len(protein) < L:
-        return 0.0
+    if L == 0:
+        return None
+    if len(protein) < L:
+        return None
     best = 0.0
     for offset in range(len(protein) - L + 1):
         window = protein[offset:offset + L]
@@ -108,12 +125,20 @@ def conservancy_rows(
         list of dict rows keyed by ``csv_columns(operator, threshold)``.
     """
     percent_col = percent_column(operator, threshold)
-    n_proteins = len(proteins)
     rows = []
+    skipped_total = 0
     for i, (name, seq) in enumerate(epitopes, start=1):
-        per_protein = [max_identity(seq, pseq) for _, pseq in proteins]
+        # Proteins too short to contain the epitope are dropped from this epitope's comparison
+        # rather than scored as 0%: they are not evidence, so they belong in neither the count
+        # nor the denominator. The denominator is therefore per-epitope, and the CSV shows it
+        # as "(matched/comparable)".
+        per_protein = [v for v in (max_identity(seq, pseq) for _, pseq in proteins)
+                       if v is not None]
+        comparable = len(per_protein)
+        skipped_total += len(proteins) - comparable
+
         matched = sum(1 for v in per_protein if matches_threshold(v, threshold, operator))
-        percent = (matched / n_proteins * 100.0) if n_proteins else 0.0
+        percent = (matched / comparable * 100.0) if comparable else 0.0
         min_id = min(per_protein) if per_protein else 0.0
         max_id = max(per_protein) if per_protein else 0.0
         rows.append({
@@ -121,11 +146,16 @@ def conservancy_rows(
             "Epitope name": name,
             "Epitope sequence": seq,
             "Epitope length": len(seq),
-            percent_col: f"{percent:.2f}% ({matched}/{n_proteins})",
+            percent_col: f"{percent:.2f}% ({matched}/{comparable})",
             "Minimum identity": f"{min_id:.2f}%",
             "Maximum identity": f"{max_id:.2f}%",
             "View details": "-",
         })
+
+    if skipped_total:
+        logger.warning(
+            "%d epitope/protein pair(s) were not comparable (the protein is shorter than the "
+            "epitope) and were left out of those epitopes' denominators.", skipped_total)
     return rows
 
 
@@ -245,14 +275,19 @@ def run_conservancy_for_dir(
                         specie, ", ".join(sorted(by_specie)),
                     )
 
-            # With a single protein to compare against, every epitope matches it (the epitope was
-            # predicted ON that protein), so the percent column is 100% whatever the threshold is.
-            # Silently reporting "100% conserved" is the failure this warning exists to surface.
+            # With one protein to compare against, the percent column has only two reachable
+            # values — 0% or 100% — because it is matched/total with total = 1. Which one comes
+            # out says nothing about conservation: it is 100% when that protein happens to be
+            # the one the epitopes were predicted on (they match themselves), and 0% otherwise,
+            # however close the sequences are. Both readings are wrong, and the 0% case is the
+            # harsher one: POA2's default -m 60 then drops every epitope and the spreadsheet
+            # comes out empty, which reads as "no conserved epitopes" rather than "no data".
             if len(pairs) < 2:
                 step.warn(
                     "the comparison set has %d protein(s), so the %s%g%% threshold cannot "
-                    "discriminate — every epitope will come out at 100%%. Supply a diversity set "
-                    "(e.g. the species' world set) for a meaningful conservancy.",
+                    "discriminate — the percent column can only be 0%% or 100%%, and neither "
+                    "value means anything. Supply a diversity set (e.g. the species' world set) "
+                    "for a meaningful conservancy.",
                     len(pairs), operator, threshold,
                 )
 
