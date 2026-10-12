@@ -97,11 +97,36 @@ Três coisas decorrem desse desenho e valem saber antes de usar:
 |---|---|---|
 | **`py3Dmol` instalado** | É importado só na hora de renderizar, para que o resto da interface e os testes funcionem sem ele | A etapa 7 mostra um erro dizendo como instalar; o mapa 2D continua funcionando |
 | **Internet no momento de visualizar** | O 3Dmol.js vem de um CDN, carregado pelo navegador | O painel aparece vazio, **sem mensagem de erro** — nada é levantado do lado do Python |
-| **Numeração de resíduo compatível** | O destaque usa as posições inicial/final dos epítopos como números de resíduo do PDB | O destaque sai deslocado ou ausente, sem erro |
+| **Que a estrutura seja da proteína analisada** | O destaque é feito por número de resíduo, e o 3Dmol.js colore o número que receber, venha ele de onde vier | A etapa 7 **recusa o destaque** e explica a incompatibilidade |
 
-A terceira é a que mais engana. Estruturas experimentais costumam ter *gaps* e começar num resíduo
-que não é o 1 da sequência usada na predição. Se o destaque parecer deslocado, é quase sempre isso
-— confira a numeração do PDB antes de suspeitar das predições.
+A terceira era a que mais enganava, e agora é verificada em vez de apenas avisada. Antes de
+destacar qualquer coisa, a etapa 7 compara a sequência da estrutura com a sequência de referência
+daquela proteína/espécie (em `inputs/`) e remapeia as posições dos epítopos para a numeração que o
+arquivo realmente usa. Abaixo de 70% de identidade ela desenha a estrutura sem destaque nenhum e
+diz por quê.
+
+Isso importa porque a falha é silenciosa. Uma análise de DENV1/DENV2 deste repositório usou como
+estrutura o PDB **4C23**, que é a **L-fuculose quinase de *Streptococcus pneumoniae*** — uma enzima
+bacteriana sem relação com dengue. Nenhuma das 19 sequências de epítopo existe naquela estrutura,
+mas as 19 posições caíam todas dentro da numeração da cadeia A (que vai de −5 a 467), então as 19
+eram pintadas de vermelho sem erro algum. Hoje a interface começa dizendo o que o arquivo contém
+(`L-FUCULOSE KINASE FUCK · STREPTOCOCCUS PNEUMONIAE`) e recusa o destaque a 25,0% e 30,0% de
+identidade.
+
+Duas rotas resolvem a numeração, e a etapa 7 usa a que estiver disponível:
+
+* **Mapeamento SIFTS**, quando a estrutura tem referência cruzada ao UniProt — exato. O POA0 grava
+  o deslocamento no `POA0_relatorio.json` quando você baixa a estrutura com `--estrutura`.
+* **Alinhamento** (`Bio.Align.PairwiseAligner`, BLOSUM62, extremidades livres), para estruturas
+  enviadas à mão ou modelos preditos.
+
+Resíduos desordenados no cristal simplesmente não existem no arquivo, então um epítopo pode ser
+posicionado corretamente e ainda assim aparecer menor do que é. Esses são recortados para a parte
+observada e marcados como parciais, em vez de serem estendidos por aritmética.
+
+> **Cuidado com o `residue_number` do PDBe.** Ele devolve dois números para o mesmo resíduo: o
+> índice da entidade e o `author_residue_number`, que é o que o arquivo de coordenadas usa. Na
+> 6H3X eles são **1** e **482**. Tomar um pelo outro desloca todo epítopo em 481 resíduos.
 
 O py3Dmol é necessário **apenas para a etapa 7**. O POA1, o POA2 e as etapas 1 a 6 não o importam.
 
@@ -340,6 +365,67 @@ Os arquivos resultantes da primeira fase do POA (POA1) deverão ser submetidos n
 
 
 O POA2 analisará os epítopos de maior ou menor conservação (a depender do objetivo da análise) e aplicará sobre estes epítopos a análise de predição de estruturas transmembranares, TMHMM. Por fim retornará os epítopos resultantes da análise de conservação e sua caracterização quanto à posição na membrana (externa, transmembranar e interna).
+
+
+### 3.0 POA0 — da espécie ao FASTA
+
+Antes do POA1 havia um passo que ninguém automatizava: achar a proteína. O POA0 faz essa busca em
+quatro bancos públicos e grava os arquivos que o resto do pipeline consome, para **qualquer**
+organismo — basta o nome.
+
+> **Na interface gráfica**, o POA0 está dentro da **etapa 1**, no expansor
+> *"🔎 Não tenho o FASTA — buscar pela espécie"*. São as mesmas quatro perguntas, em menus, e o
+> arquivo gerado é adotado como se você o tivesse enviado: a tabela de cabeçalhos, a checagem de
+> resíduos ambíguos e a união no `-f` tratam os dois casos igual. A interface e a linha de comando
+> chamam a mesma função (`poa.core.dbsearch.run_poa0`), então não podem divergir.
+
+```bash
+python POA0_v1.0.py -s "Oropouche virus" -d entradas
+```
+
+Sem mais nada, ele resolve o táxon, escolhe a proteína mais bem ranqueada e grava o FASTA. Mas a
+escolha raramente deve ser automática, então quatro modos de listagem mostram as opções e encerram:
+
+```bash
+python POA0_v1.0.py -s "Oropouche virus"                 # qual táxon?
+python POA0_v1.0.py -s "Oropouche virus" -l proteinas    # qual proteína?
+python POA0_v1.0.py -a A0A0D4BSW3 -l regioes             # qual região?
+python POA0_v1.0.py -a A0A0D4BSW3 -l estruturas          # qual estrutura?
+```
+
+e então a execução que grava:
+
+```bash
+python POA0_v1.0.py -a A0A0D4BSW3 -r 482-703 --nome GcHead \
+                    --sigla OROV --estrutura 6H3X -d entradas
+```
+
+| Fonte | O que fornece |
+|---|---|
+| **UniProt** | táxon, entradas, sequências e as anotações `Chain` (proteínas maduras) e `Domain` |
+| **InterPro** | domínios Pfam com coordenadas — o UniProt referencia o Pfam mas não traz os limites |
+| **PDBe SIFTS** | a correspondência resíduo a resíduo entre a sequência e uma estrutura |
+| **RCSB** | o arquivo da estrutura |
+
+A região pode ser dada por nome (`-r "Envelope protein E"`), por id PDB ou por intervalo
+(`-r 482-703`). Sem `-r`, usa a sequência inteira.
+
+**Saídas em `-d`:** `<Nome>_<Sigla>.fasta` (um registro, serve ao mesmo tempo de entrada dos
+preditores e de `-f` do POA1/POA2), `structure_<PDB>.pdb` quando se pede `--estrutura`, e
+`POA0_relatorio.json` com a procedência — táxon, acessão, região, o cabeçalho do arquivo de
+estrutura e o deslocamento SIFTS.
+
+**Um arquivo só para a predição e para o `-f`.** As predições reportam posições relativas à
+sequência em que rodaram; entregar ao POA1/POA2 uma sequência diferente (a poliproteína inteira,
+por exemplo) desloca todo epítopo. Usar o mesmo arquivo nos dois lugares torna esse erro impossível.
+
+**Cabeçalho `Proteína_Sigla_Acessão`**, que é o que o `poa.core.topology.sameVirus` lê: campo 0 é a
+proteína, campo 1 é a espécie. Tudo é separado por `_`, então nenhum dos dois campos pode conter um
+underscore — o POA0 remove pontuação e espaços e avisa quando mudou o nome (`Envelope protein E`
+vira `EnvelopeproteinE`; use `--nome` para escolher outro).
+
+**Escopo taxonômico:** `organism_id` casa só com o táxon exato; `--descendentes` usa `taxonomy_id`,
+que inclui cepas e isolados. Para vírus a diferença costuma ser de uma ordem de grandeza.
 
 
 ### 3.1 POA1

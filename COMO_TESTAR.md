@@ -38,13 +38,18 @@ ele — só a estrutura 3D da etapa 7 não renderiza.
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-Esperado nesta revisão: **155 passando**. Se algum falhar, o nome do teste já diz o que quebrou.
+Esperado nesta revisão: **254 passando**. Se algum falhar, o nome do teste já diz o que quebrou.
 
 Para rodar só o que cobre as mudanças recentes:
 
 ```powershell
+.venv\Scripts\python.exe -m pytest -q -k "structure_map or dbsearch"      # 36, POA0 + guarda 3D
 .venv\Scripts\python.exe -m pytest -q -k "conservancy or threshold or run"
 ```
+
+Nenhum teste da suíte acessa a rede: as respostas do UniProt, do InterPro e do PDBe são
+simuladas, com cópias reduzidas das respostas reais. Por isso a suíte roda em ~11 s e funciona
+offline. Os testes do §8 abaixo é que exercitam os bancos de verdade.
 
 Os testes de interface dirigem o Streamlit sem navegador, incluindo os filtros da **etapa 5**
 com e sem pyTMHMM disponível.
@@ -197,3 +202,230 @@ Na linha de comando, `POA_LOG_FILE` aponta o arquivo, já que não há pasta de 
 $env:POA_LOG_FILE = "poa1.log"
 python POA1_v1.0.py -f proteins.fasta -d results -b3 bepipred3.fasta
 ```
+
+---
+
+## 8. Testar o POA0 e a verificação da estrutura 3D
+
+Esta parte precisa de **internet** (UniProt, InterPro, PDBe, RCSB). Nada aqui grava dentro de
+`results/` — escolha uma pasta de rascunho.
+
+### 8.1 Da espécie ao FASTA, para qualquer vírus
+
+As quatro perguntas, cada uma mostrando as opções e encerrando:
+
+```powershell
+.venv\Scripts\python.exe POA0_v1.0.py -s "Oropouche virus"                 # qual táxon?
+.venv\Scripts\python.exe POA0_v1.0.py -s "Oropouche virus" -l proteinas    # qual proteína?
+.venv\Scripts\python.exe POA0_v1.0.py -a A0A0D4BSW3 -l regioes             # qual região?
+.venv\Scripts\python.exe POA0_v1.0.py -a A0A0D4BSW3 -l estruturas          # qual estrutura?
+```
+
+O que esperar, medido nesta máquina:
+
+| Comando | Resultado |
+|---|---|
+| `-s "Oropouche virus"` | táxon **118655**, e `Oropouche like virus` como segunda opção |
+| `-l proteinas` | **A0A0D4BSW3** em primeiro — 1.420 aa, TrEMBL, a única com PDB (6H3X) |
+| `-a A0A0D4BSW3 -l regioes` | 3 regiões: `Domain+Pfam` 27–306, `PDB` 482–703, `Domain+Pfam` 514–1359 |
+
+A coluna de fonte mostra `Domain+Pfam` quando duas fontes descrevem o mesmo intervalo — num
+registro TrEMBL o `Domain` do UniProt é derivado do Pfam, então as duas concordam.
+
+Troque o nome por qualquer outro vírus. `-s "Zika virus"` dá o táxon 64320 e, nas regiões, as
+**12 proteínas maduras** anotadas como `Chain` (é entrada SwissProt), entre elas
+`Envelope protein E` em 291–790.
+
+### 8.2 Gerar os arquivos
+
+```powershell
+.venv\Scripts\python.exe POA0_v1.0.py -a A0A0D4BSW3 -r 482-703 --nome GcHead `
+                                      --sigla OROV --estrutura 6H3X -d results\teste_poa0
+```
+
+Confira três coisas em `results\teste_poa0\`:
+
+1. `GcHead_OROV.fasta` — **222 aa**, cabeçalho `>GcHead_OROV_A0A0D4BSW3` (três campos:
+   proteína, espécie, acessão).
+2. `structure_6H3X.pdb` — baixado do RCSB.
+3. `POA0_relatorio.json` — procedência. O campo `estrutura.sifts.pdb_start` deve ser **482**
+   (numeração do autor) e `entity_start` deve ser **1** (índice da entidade). São números
+   diferentes para o mesmo resíduo; confundi-los desloca todo epítopo em 481 posições.
+
+**Regressão:** pedir a região pelo id PDB dá o mesmo arquivo que pedir por coordenadas.
+
+```powershell
+.venv\Scripts\python.exe POA0_v1.0.py -a A0A0D4BSW3 -r 6H3X --nome GcHead --sigla OROV -d results\teste_pdbid
+Compare-Object (Get-Content results\teste_poa0\GcHead_OROV.fasta) (Get-Content results\teste_pdbid\GcHead_OROV.fasta)
+```
+
+O `Compare-Object` não deve imprimir nada — os arquivos são idênticos.
+
+### 8.3 A verificação da estrutura, fora da interface
+
+`tools\check_structure.py` faz a mesma conferência da etapa 7 em linha de comando. Sai com
+código **0** quando a estrutura serve e **1** quando não serve.
+
+**O caso que deve passar:**
+
+```powershell
+.venv\Scripts\python.exe tools\check_structure.py -p results\teste_poa0\structure_6H3X.pdb `
+                                                  -f results\teste_poa0\GcHead_OROV.fasta -c A
+```
+
+Esperado: `POLYPROTEIN · OROPOUCHE VIRUS`, **100,0% de identidade**, 221 resíduos observados,
+`RESULTADO: a estrutura corresponde`.
+
+Vem junto um aviso de "1 epítopo parcialmente ausente no cristal", e ele está certo: sem `-e` a
+ferramenta confere a referência inteira (1–222) como se fosse um epítopo só, e o resíduo **703**
+(o último) não foi resolvido na estrutura — a cadeia A tem 221 dos 222. É exatamente o tipo de
+detalhe que a figura sozinha não mostra.
+
+**O caso que deve falhar** — e este você já tem no repositório, sem precisar de internet:
+
+```powershell
+.venv\Scripts\python.exe tools\check_structure.py `
+    -p "results\08102026-TESTANDO\inputs\structure_4C23.pdb" `
+    -f "results\08102026-TESTANDO\inputs\ref_0_DENV1.fasta" `
+    -e "results\08102026-TESTANDO\poa1_out\Conservancy Analysis\DENV1_epitopes.fasta" -c A
+```
+
+Esperado: `L-FUCULOSE KINASE FUCK · STREPTOCOCCUS PNEUMONIAE`, **25,0% de identidade**,
+**0 de 11 epítopos mapeados**, `RESULTADO: a estrutura NAO corresponde`.
+
+Esse é o defeito que motivou a verificação. O 4C23 é uma quinase bacteriana de açúcar, sem
+relação com dengue, e foi usado como estrutura em duas análises de DENV1/DENV2. Nenhuma das 19
+sequências de epítopo existe nele, mas as 19 posições caem dentro da numeração da cadeia A (que
+vai de −5 a 467) — então, antes desta revisão, as 19 eram pintadas de vermelho sem erro algum.
+
+### 8.4 O POA0 pela interface (etapa 1)
+
+```powershell
+.venv\Scripts\streamlit.exe run poa\gui\app.py
+```
+
+Crie uma análise nova e abra a **etapa 1**. No alto, o expansor
+**"🔎 Não tenho o FASTA — buscar pela espécie (POA0)"**. Dentro dele, as mesmas quatro perguntas
+da linha de comando, uma destravando a seguinte:
+
+1. Digite `Oropouche virus` → **1. Buscar organismo** → deve listar o táxon **118655**.
+2. **Listar proteínas deste táxon** → **A0A0D4BSW3** em primeiro, com `PDB: 6H3X`.
+3. **Listar regiões desta proteína** → três regiões, e um seletor de estrutura aparece com
+   `6H3X  UniProt 482-703  15.6% da sequência  2.09 A  cadeia(s) A`.
+4. Escolha a região, ajuste os campos do cabeçalho (ex.: `GcHead` e `OROV`), escolha a estrutura
+   e clique **⬇️ Gerar o FASTA**.
+
+O que deve acontecer: o arquivo aparece em `inputs/`, a tabela de cabeçalhos logo abaixo passa a
+mostrá-lo com espécie `OROV`, e a estrutura baixada já fica carregada na etapa 7. Nenhuma
+dessas telas pede upload — é o caminho de quem não tem o FASTA.
+
+> Deixe a caixa **"Meus cabeçalhos estão em `Espécie_Proteína`"** desmarcada: o POA0 já grava na
+> convenção certa, e inverter os campos corromperia o que ele escreveu.
+
+O painel é coberto por `tests/test_gui_poa0.py` (5 testes, com os bancos simulados), inclusive o
+caso de o UniProt estar fora do ar — a interface mostra o erro e continua utilizável.
+
+### 8.5 A verificação da estrutura pela interface (etapa 7)
+
+```powershell
+.venv\Scripts\streamlit.exe run poa\gui\app.py
+```
+
+Abra a análise `08102026-TESTANDO` (ou rode o fluxo das etapas 1 a 3 com os seus dados) e vá à
+etapa 7. Envie `results\08102026-TESTANDO\inputs\structure_4C23.pdb`. Deve acontecer, nesta ordem:
+
+1. Uma faixa azul dizendo o que o arquivo contém: **L-FUCULOSE KINASE FUCK · STREPTOCOCCUS
+   PNEUMONIAE · X-RAY DIFFRACTION · 2.00 ANGSTROMS**.
+2. Uma faixa vermelha de **estrutura incompatível**, com a identidade medida.
+3. A estrutura desenhada **em cinza, sem nenhum destaque** — ela continua visível, o que é
+   recusado é a afirmação de que aqueles resíduos são os epítopos.
+
+Depois envie `results\teste_poa0\structure_6H3X.pdb` numa análise cuja referência seja
+`GcHead_OROV.fasta`: aí sim os epítopos aparecem em vermelho, com uma faixa verde dizendo
+quantos foram mapeados, a identidade e por qual método.
+
+> A etapa 7 precisa de internet para desenhar (o 3Dmol.js vem de um CDN) e do `py3Dmol`
+> instalado. A verificação em si não precisa de nenhum dos dois — por isso o
+> `tools\check_structure.py` funciona offline.
+
+---
+
+## 9. Validar a conservância local contra o IEDB
+
+A reimplementação local reproduz o método de Bui et al. (2007) que o IEDB aplica, mas o IEDB
+**não** expõe essa ferramenta por API (reconfirmado em 12/10/2026). Então a equivalência não pode
+ser verificada automaticamente: ela depende de uma exportação que você faz uma vez, à mão, e
+guarda como evidência.
+
+**É o passo que separa "o pipeline roda" de "o número é defensável em publicação.**
+
+1. Rode a etapa 4 localmente e guarde o FASTA de epítopos e o de comparação.
+2. No [Epitope Conservancy Analysis](http://tools.iedb.org/conservancy/), submeta **os mesmos**
+   epítopos, **o mesmo** conjunto de proteínas e **o mesmo** limiar/operador.
+3. Baixe o CSV e compare:
+
+```powershell
+.venv\Scripts\python.exe tools\validate_conservancy.py `
+    -i iedb_export.csv `
+    -e "results\<analise>\poa1_out\Conservancy Analysis\<SP>_epitopes.fasta" `
+    -p results\<analise>\inputs\comparison_<SP>.fasta `
+    -t 70 --operador ">="
+```
+
+A ferramenta recalcula localmente e compara os três campos numéricos de cada epítopo (percentual,
+`Minimum identity`, `Maximum identity`), com tolerância de 0,011 pp — o bastante para absorver o
+arredondamento de 2 casas do IEDB e nada mais. Sai com código **0** se tudo bate e **1** se diverge.
+
+Se divergir, o relatório diz em qual epítopo e em qual campo, com o delta. Duas causas prováveis
+antes de suspeitar do algoritmo:
+
+* **limiar ou operador diferentes** entre o site e o comando — o cabeçalho das duas colunas é
+  impresso no alto justamente para essa conferência. O IEDB escreve `<=` onde o POA escreve `<`;
+* **conjunto de comparação diferente** — epítopos "só no IEDB" ou "só no local" aparecem listados.
+
+Guarde o CSV do IEDB junto da análise. Ele é a evidência de que, **naquele conjunto de dados**,
+os números locais podem substituir os do site.
+
+### 9.1 O algoritmo, sem precisar do site
+
+Independente da validação acima, 16 testes fixam o método contra valores calculados à mão —
+janela sem gaps, máximo sobre os offsets, a fronteira exata do limiar e a semântica das colunas
+de identidade mínima e máxima:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_conservancy_algorithm.py -q
+```
+
+Se algum deles quebrar, o cálculo mudou — e qualquer resultado publicado com a versão anterior
+deixa de valer.
+
+---
+
+## 10. Apagar uma análise
+
+Na tela inicial, aba **"Abrir existente"**, selecione a análise e abra o expansor
+**🗑️ Apagar esta análise**. Ele mostra quantos arquivos e quantos MB serão removidos.
+
+A confirmação é **digitar o nome da pasta**, não um segundo botão. Um par de botões vira reflexo;
+digitar o nome é uma decisão — e torna impossível apagar uma análise diferente daquela que você
+está lendo na tela. O botão só habilita quando o texto confere exatamente.
+
+**Não tem desfazer e nada vai para a lixeira.** Some a pasta inteira: predições (que custaram
+chamadas de API e minutos), CSVs de conservância, planilhas do POA2 e o log.
+
+O backend recusa quatro alvos mesmo que chamado com os argumentos errados:
+
+| Alvo | Por quê |
+|---|---|
+| A raiz `results/` | só uma análise por vez |
+| Qualquer caminho fora da raiz | um argumento errado não pode sair da árvore de resultados |
+| A pasta `cache/` | é compartilhada por todas as análises; apagá-la custaria horas de API |
+| Pasta que não é análise (sem `run.json` nem as subpastas) | `results/` também guarda saídas do POA0 e rascunhos |
+
+Para conferir as salvaguardas:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_run_delete.py -q
+```
+
+São 15 testes, dos quais 9 verificam recusas — a parte que importa numa operação irreversível.

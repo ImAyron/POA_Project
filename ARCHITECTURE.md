@@ -67,7 +67,7 @@ ferramenta web de Conservancy Analysis e baixar os CSVs.
    │  PepiTMHMM.tmhmmAnalysis(args, df):                                                  │
    │      TMHMM.pyTMHMMpredict(-f) → topologia por proteína                              │
    │      casa cada epítopo à proteína (por substring) → % de resíduos O/M/I             │
-   │  df.to_excel(POA2_analysis_{t}.xlsx)                                                 │
+   │  df.to_excel(POA2_analysis_{ge|lt}{t}.xlsx)                                                 │
    │  (opcional -rf) getfastafile() → FASTA por região de membrana                       │
    └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
