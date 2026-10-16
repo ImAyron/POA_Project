@@ -22,6 +22,109 @@ em [`REVISAO.md`](REVISAO.md). Os números abaixo registram a entrega anterior; 
   erro e `poa.log` por análise.
 * **Documentação:** seção nova sobre a visualização 3D e a dependência `py3Dmol`.
 
+**Revisão de 11/10/2026 — POA0 e verificação estrutural:**
+
+* **POA0 (`POA0_v1.0.py`, `poa/core/dbsearch.py`, `poa/services/database_client.py`):** busca em
+  UniProt, InterPro, PDBe SIFTS e RCSB. De um nome de organismo aos arquivos do pipeline, para
+  qualquer espécie. Quatro modos de listagem (táxons, proteínas, regiões, estruturas).
+* **Guarda da visualização 3D (`poa/core/structure_map.py`):** a etapa 7 passa a verificar que a
+  estrutura é da proteína analisada antes de destacar qualquer resíduo, remapeando as posições
+  por SIFTS (exato) ou por alinhamento.
+* **Testes:** 36 novos (254 no total).
+
+**Revisão de 12/10/2026 — correções nas etapas 4 e 5:**
+
+Saídas de uma revisão do código de conservância e topologia. Três defeitos, todos encontrados
+rodando o pipeline completo do Oropouche (POA0 → EMBOSS + IEDB → POA1 → conservância → POA2):
+
+* **O aviso de conjunto unitário dizia a coisa errada.** Afirmava que "todo epítopo sai com
+  100%". Com `n=1` a coluna é `casados/1`, então só existem **0% ou 100%** — 100% quando a única
+  proteína é aquela em que os epítopos foram preditos (casam consigo mesmos), 0% em qualquer
+  outro caso. Os próprios resultados do repositório contradiziam o aviso: em
+  `results/08102026-DENV1_DENV2`, o DENV1 saiu `0.00% (0/1)` com identidade 67,05%, e aí o
+  `-m 60` do POA2 descarta tudo e a planilha sai **vazia**. Quem lia o aviso esperava
+  falso-positivo e recebia aniquilação total. Texto corrigido no cliente e na etapa 4.
+* **`-g` e `-l` no mesmo limiar gravavam o mesmo arquivo.** `POA2_analysis_90.xlsx` para duas
+  perguntas opostas — conservados e únicos — com o segundo apagando o primeiro, sem aviso.
+  Confirmado por md5. O `-rf` colapsava igual: `-rf 1` (externos) e `-rf 3` (internos) são
+  conjuntos disjuntos num nome só. Agora: `POA2_analysis_ge90.xlsx` e
+  `POA2_analysis_ge90_rf1.fasta`. Nenhum teste cobria o nome, o que explica como passou.
+* **Proteína mais curta que o epítopo valia 0% de identidade.** "Não comparável" e "0% idêntica"
+  são afirmações diferentes: a primeira não é evidência de nada. Sob `>=` era inofensivo (0%
+  falha qualquer limiar), mas sob `<` **contava como prova de que o epítopo é único** — e
+  arrastava a coluna `Minimum identity` para 0,00%, fazendo o `-imin 60` do POA2 descartar o
+  epítopo sem dizer nada. Num conjunto com 2 cepas e 2 fragmentos curtos, "únicos" saía
+  `75.00% (3/4)`; agora sai `50.00% (1/2)`. `max_identity` devolve `None` nesse caso e o
+  denominador passa a contar só as proteínas comparáveis. Nos dados reais do Oropouche (30
+  cepas de 222 aa) **nada mudou** — a correção só age onde havia o defeito.
+
+Mais três defeitos silenciosos, da mesma revisão:
+
+* **O `-m` virava unanimidade sem avisar.** A conservância é `casados/n`, então só assume `n+1`
+  valores. Com `n=2` eles são 0, 50 e 100 — e o padrão `-m 60` fica indistinguível de exigir que
+  **todas** as proteínas correspondam. Quem escolheu um número que significa "a maioria delas"
+  recebia unanimidade. O aviso existente só disparava em `n=1`. Agora
+  `check_match_resolution` informa, no log e na etapa 5, qual valor o `-m` escolhido de fato
+  assume. Com as 30 cepas do Oropouche (grade de 3,33) o `-m 60` existe e nada é dito.
+* **Cabeçalhos repetidos no `-f` escreviam a topologia de uma sequência na linha de outra.** O
+  dicionário de anotações guardava o último registro homônimo; o casamento escolhia o primeiro.
+  Com comprimentos diferentes a fatia da anotação saía curta e as três frações `Portion_*`
+  somavam menos de 1, sem erro. Agora o POA2 recusa o FASTA e nomeia os cabeçalhos repetidos.
+* **`warnings.warn` não chegava a lugar nenhum.** A topologia reporta suas ressalvas assim —
+  epítopo casando com mais de um registro, coordenadas que não batem. O Python manda para o
+  stderr uma vez por ponto de chamada; o Streamlit não mostra stderr e o `poa.log` nunca os via.
+  `logging.captureWarnings` passa a roteá-los para os mesmos handlers do `poa`, inclusive o
+  arquivo da análise. No mesmo passo, o aviso "epitope not found" virou `DEBUG`: ele disparava
+  uma vez por registro que não continha o epítopo, inclusive no caso normal em que um registro
+  seguinte o continha — ruído que ensina a ignorar avisos. O que importa (nenhum registro
+  continha) continua sendo avisado, uma vez.
+
+Mais duas peças de validação:
+
+* **`tools/validate_conservancy.py`** compara a conservância local com uma exportação real do
+  IEDB, linha a linha. O IEDB não expõe essa ferramenta por API (reconfirmado em 12/10/2026: a
+  página responde, a lista de APIs não a menciona), então a equivalência depende de uma
+  exportação manual — e agora há como conferi-la em um comando.
+* **`tests/test_conservancy_algorithm.py`** (16 testes) fixa o método de Bui et al. 2007 contra
+  valores calculados à mão: janela sem gaps, máximo sobre os offsets, a fronteira exata do
+  limiar (`>=` inclui, `<` exclui) e a semântica de `Minimum`/`Maximum identity`.
+
+Também confirmado nesta revisão: **o pyTMHMM prediz de verdade**. Até aqui todos os testes usavam
+um stub que marcava tudo como "outside" (PROMPT §6). Na poliproteína inteira do Oropouche ele
+encontra as 5 hélices transmembrana anotadas no UniProt — (1374,1396) exata, as demais com um ou
+dois resíduos de diferença, e a primeira dividida em duas. Nenhuma cai em 482–703, de modo que o
+resultado "100% outside" dos 130 epítopos do domínio Gc é predição real, não artefato.
+
+---
+
+A guarda nasceu de um defeito medido neste repositório, não de uma hipótese. Duas análises de
+DENV1/DENV2 em `results/` usaram como estrutura o PDB **4C23**, que é a **L-fuculose quinase de
+*Streptococcus pneumoniae*** (EC 2.7.1.51, raios X 2,00 Å, cadeias A e B de 473 resíduos). Rodando
+os 19 epítopos daquelas análises contra o arquivo:
+
+```
+TOTAL: 19 epitopos | sequencia encontrada no 4C23: 0 | intervalo fora da cadeia A: 0
+```
+
+Nenhuma das 19 sequências existe na estrutura, e mesmo assim os 19 intervalos caíam dentro da
+numeração da cadeia A (de −5 a 467) — então o 3Dmol.js pintava os 19 de vermelho sem erro, sem
+aviso e sem sintoma visível. O README avisava do risco; o que faltava era a verificação. Hoje a
+etapa 7 recusa o destaque a 25,0% (DENV1) e 30,0% (DENV2) de identidade e anuncia o conteúdo do
+arquivo antes de usá-lo.
+
+Três achados de implementação que valem registro:
+
+* **O PDBe devolve duas numerações.** `residue_number` é o índice da entidade; a numeração que o
+  arquivo de coordenadas usa é `author_residue_number`. Na 6H3X são **1** e **482** para o mesmo
+  resíduo; confundi-las desloca todo epítopo em 481 posições. O `author_residue_number` do último
+  resíduo vem `null` nessa entrada, e é derivado do início e do comprimento do segmento.
+* **Listar estruturas por referência cruzada não escala.** A poliproteína da Zika tem 281
+  estruturas; uma chamada SIFTS por entrada levava a listagem a minutos. O endpoint
+  `best_structures` responde pela acessão inteira em 1,8 s (600 mapeamentos de cadeia).
+* **`hasattr` quebra no `PairwiseAligner`.** Ler um gap score levanta
+  `ValueError: gap scores are different` quando os dois lados diferem, então a detecção de versão
+  da API do biopython é feita escrevendo, não lendo.
+
 ---
 
 ## 1. Resumo executivo

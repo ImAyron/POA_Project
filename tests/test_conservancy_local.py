@@ -16,7 +16,19 @@ from poa.services import conservancy_client as cc
 def test_max_identity_exact_and_mismatch():
     assert cc.max_identity("AYI", "GGAYIGG") == 100.0          # exact window present
     assert round(cc.max_identity("AYI", "GGAYLGG"), 2) == round(2 / 3 * 100, 2)  # one mismatch
-    assert cc.max_identity("AYI", "GG") == 0.0                 # protein shorter than epitope
+
+
+def test_protein_shorter_than_the_epitope_is_not_comparable():
+    """
+    "No window exists" is not "0% identical", and this used to return the latter.
+
+    0% is evidence that the epitope is absent; a protein shorter than the epitope carries no
+    evidence at all. Scoring it 0.0 was harmless under '>=' but inverted the meaning under '<',
+    where a protein that *cannot* contain the epitope counted as proof that the epitope is
+    unique to its source.
+    """
+    assert cc.max_identity("AYI", "GG") is None
+    assert cc.max_identity("", "GGAYIGG") is None
 
 
 def test_conservancy_rows_structure_and_values():
@@ -267,3 +279,57 @@ def test_identity_filter_unique_keeps_only_epitopes_below_the_threshold(tmp_path
     filtered = conservancy_parser.EpitConservAnalysis(70, "<", 60, 100, 0, str(d),
                                                       identity_filter=True)
     assert set(filtered["Epitope name"]) == {"SP_E_M_4_6"}   # maximum identity 65 < 70
+
+
+def test_stale_csv_from_an_earlier_run_is_detected(tmp_path):
+    """
+    Nothing empties the conservancy folder, and POA2 merges every CSV under it.
+
+    A species that disappears between two runs — or a file left from another analysis — keeps
+    being folded into the result, and when the header matches it is completely invisible.
+    """
+    poa1_dir = _write_poa1_epitopes(tmp_path)
+    out_dir = tmp_path / "csvs"
+    cc.run_conservancy_for_dir(str(poa1_dir), [("P1", "GGAYIGG"), ("P2", "GGAYLGG")],
+                               threshold=70, out_dir=str(out_dir), operator=">=")
+
+    assert conservancy_parser.stale_csvs(str(out_dir)) == []
+
+    # A leftover from an earlier run, with the very same header, so nothing else can spot it.
+    (out_dir / "MERS_conservancy.csv").write_text(
+        "Epitope #,Epitope name,Epitope sequence,Epitope length,"
+        "Percent of protein sequence matches at identity >= 70%,Minimum identity,"
+        "Maximum identity,View details\n"
+        "1,MERS_E_M_1_3,AYI,3,100.00% (2/2),80.00%,100.00%,-\n", encoding="utf-8")
+
+    assert conservancy_parser.stale_csvs(str(out_dir)) == ["MERS_conservancy.csv"]
+
+
+def test_stale_csv_is_reported_by_poa2(tmp_path, caplog):
+    """Warned by default — deleting a file the user put there is not the parser's call."""
+    poa1_dir = _write_poa1_epitopes(tmp_path)
+    out_dir = tmp_path / "csvs"
+    cc.run_conservancy_for_dir(str(poa1_dir), [("P1", "GGAYIGG"), ("P2", "GGAYLGG")],
+                               threshold=70, out_dir=str(out_dir), operator=">=")
+    (out_dir / "MERS_conservancy.csv").write_text(
+        "Epitope #,Epitope name,Epitope sequence,Epitope length,"
+        "Percent of protein sequence matches at identity >= 70%,Minimum identity,"
+        "Maximum identity,View details\n"
+        "1,MERS_E_M_1_3,AYI,3,100.00% (2/2),80.00%,100.00%,-\n", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        conservancy_parser.EpitConservAnalysis(70, ">=", 0, 100, 0, str(out_dir))
+    assert "MERS_conservancy.csv" in caplog.text
+
+    # -strict turns it into a stop, like the threshold disagreement it sits next to.
+    with pytest.raises(ValueError, match="MERS_conservancy.csv"):
+        conservancy_parser.EpitConservAnalysis(70, ">=", 0, 100, 0, str(out_dir), strict=True)
+
+
+def test_no_sidecar_means_nothing_to_compare_against(tmp_path):
+    """Without metadata there is no record of what the run produced, so nothing is 'stale'."""
+    d = tmp_path / "csvs"
+    d.mkdir()
+    (d / "x_conservancy.csv").write_text("Epitope #\n1\n", encoding="utf-8")
+
+    assert conservancy_parser.stale_csvs(str(d)) == []

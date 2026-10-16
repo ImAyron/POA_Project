@@ -285,6 +285,94 @@ def map_EpConservFiles(directory):
     return sorted(EpConservFiles)
 
 
+def effective_match_threshold(seq_match: float, n_proteins: int) -> Optional[float]:
+    """
+    The value ``-m`` actually behaves as, given a comparison set of ``n_proteins``.
+
+    The percent column is ``matched/n``, so it can only ever take the ``n + 1`` values
+    ``0, 100/n, 200/n, ..., 100``. A ``-m`` that falls between two of them behaves as the next
+    one up — with ``n = 2`` the reachable values are 0, 50 and 100, so the default ``-m 60``
+    is indistinguishable from demanding **every** protein match. The researcher picked a number
+    meaning "most of them" and got unanimity.
+
+    Args:
+        seq_match: the ``-m`` the user chose, in percent.
+        n_proteins: size of the comparison set.
+
+    Returns:
+        The smallest reachable percentage that is ``>= seq_match``, or ``None`` when ``n`` is
+        unknown/zero (nothing can be said).
+    """
+    if not n_proteins or n_proteins <= 0:
+        return None
+    step = 100.0 / n_proteins
+    for k in range(n_proteins + 1):
+        value = k * step
+        if value >= seq_match - 1e-9:
+            return round(value, 6)
+    return 100.0
+
+
+def check_match_resolution(directory: str, seq_match: float) -> List[str]:
+    """
+    Report species whose comparison set is too small for the chosen ``-m`` to mean what it says.
+
+    Complements the ``len(pairs) < 2`` warning raised when the CSVs are produced: that one only
+    fires for a single protein, but the gap between the chosen ``-m`` and its effective value
+    stays wide for several proteins (``n = 3`` still jumps 0 → 33 → 67 → 100).
+
+    Args:
+        directory: the folder of conservancy CSVs.
+        seq_match: POA2's ``-m``.
+
+    Returns:
+        One human-readable line per affected species, empty when every set is fine or there is
+        no sidecar to tell how large they were.
+    """
+    meta = read_metadata(directory)
+    if meta is None or not meta.species:
+        return []
+
+    avisos = []
+    for specie, info in sorted(meta.species.items()):
+        n = int(info.get("n_proteins") or 0)
+        effective = effective_match_threshold(seq_match, n)
+        if effective is None or effective <= seq_match + 1e-9:
+            continue
+        detalhe = ("equivale a exigir que TODAS correspondam"
+                   if effective >= 100.0 else f"equivale a -m {effective:g}")
+        avisos.append(
+            f"{specie}: o conjunto tem {n} proteína(s), então a conservância só assume valores "
+            f"de {100.0 / n:g} em {100.0 / n:g} pontos — o -m {seq_match:g} escolhido "
+            f"{detalhe}.")
+    return avisos
+
+
+def stale_csvs(directory: str) -> List[str]:
+    """
+    CSVs in ``directory`` that the run described by the sidecar did not produce.
+
+    Nothing ever empties the conservancy directory, and :func:`EpitConservAnalysis` concatenates
+    **every** CSV it finds under it. So a species dropped between two runs — or a leftover from
+    an earlier analysis — keeps being folded into the result, and when the header happens to
+    match it is completely invisible.
+
+    Args:
+        directory: the ``-d`` of POA2.
+
+    Returns:
+        File names (not paths) present on disk but absent from the sidecar's species list,
+        sorted. Empty when there is no sidecar, since then there is nothing to compare against
+        and :func:`check_threshold` already reports the missing provenance.
+    """
+    meta = read_metadata(directory)
+    if meta is None:
+        return []
+    produced = {str(info.get("csv", "")) for info in (meta.species or {}).values()}
+    found = {os.path.basename(p) for p in map_EpConservFiles(directory)}
+    return sorted(found - produced)
+
+
 def strip_percent(series: pd.Series) -> pd.Series:
     """``'80.00%' -> 80.0``; non-numeric and missing cells become NaN instead of raising."""
     text = series.astype(str).str.strip().str.rstrip("%").str.strip()
@@ -314,6 +402,23 @@ def EpitConservAnalysis(ID_threshold, symbol, seq_match, max_ID, min_ID, directo
     """
     # Refuse to filter data that was not produced under the requested threshold/operator.
     check_threshold(directory, ID_threshold, symbol, strict=strict)
+
+    # Every CSV under the directory is concatenated below, so one left over from an earlier run
+    # silently joins this analysis. Under -strict that is a stop; otherwise it is named in the
+    # log, because deleting a file the user put there is not this function's call to make.
+    leftovers = stale_csvs(directory)
+    if leftovers:
+        message = (f"{len(leftovers)} CSV(s) in {directory} were not produced by the run recorded "
+                   f"in {METADATA_FILENAME} and will be merged into this analysis anyway: "
+                   f"{', '.join(leftovers)}. Remove them, or re-run the conservancy step.")
+        if strict:
+            raise ValueError(message)
+        logger.warning(message)
+
+    # Not an error — a small comparison set is a fact about the data, not a mistake in the run —
+    # but the gap between the -m that was typed and the one that takes effect has to be visible.
+    for aviso in check_match_resolution(directory, seq_match):
+        logger.warning("%s", aviso)
 
     # Get the list of CSV files in the directory
     filesList = map_EpConservFiles(directory)

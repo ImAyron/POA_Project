@@ -38,6 +38,21 @@ def test_field_has_help_text_and_it_is_wired_up(field):
     assert f'HELP["{field}"]' in SOURCE, f"'{field}' tem texto mas não é usado em app.py"
 
 
+def test_every_referenced_help_key_exists():
+    """
+    The inverse of the orphan test, and the one that fails loudly in production without it.
+
+    ``HELP["x"]`` on a key that is not in the table raises ``KeyError`` while Streamlit is
+    rendering, which aborts the **whole step** — in step 1 that takes the FASTA uploader down
+    with it, so a missing tooltip reads as "the upload is gone". A subscript is a hard
+    dependency; this checks every one of them resolves.
+    """
+    referenced = set(re.findall(r'HELP\["(\w+)"\]', SOURCE))
+    missing = sorted(referenced - set(HELP))
+
+    assert not missing, f"app.py usa chaves que não existem em HELP: {missing}"
+
+
 def test_no_help_text_is_orphaned():
     """
     Every entry must reach a field.

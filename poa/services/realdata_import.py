@@ -240,6 +240,14 @@ def best_world_match(
         wseq = str(first.seq)
         # query the shorter into the longer so a single-protein ref maps onto a polyprotein too
         ident = max_identity(reference_seq, wseq) if ref_len <= len(wseq) else max_identity(wseq, reference_seq)
+        # max_identity returns None for "not comparable" (either sequence empty). That is not a
+        # score, so the file cannot be ranked and is skipped: keeping it would make the max() and
+        # the tie comparison below raise TypeError, which is what an empty first record — the case
+        # step 1 already warns about — used to do here.
+        if ident is None:
+            logger.warning("%s service/realdata-import | %s: first record is empty, so it cannot "
+                           "be scored against the reference; skipped.", TAG_WARN, path)
+            continue
         candidates.append((path, ident, len(wseq)))
 
     if not candidates:

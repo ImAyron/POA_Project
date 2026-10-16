@@ -130,6 +130,18 @@ def tmhmmAnalysis(args, dataframe):
     records = [(str(rec.id).upper(), str(rec.seq).lower(), len(rec))
                for rec in SeqIO.parse(args.f, "fasta")]
 
+    # Two records sharing a header are a data error with a silent consequence: the annotation
+    # dict keeps the LAST of them while the match below picks the FIRST, so the topology of one
+    # sequence gets written against another. If they differ in length the annotation slice is
+    # short too, and the three Portion_* fractions quietly sum to less than 1.
+    duplicates = sorted({rid for rid in ids_TMHMM_list
+                         if ids_TMHMM_list.count(rid) > 1})
+    if duplicates:
+        raise Exception(
+            f"Failed because the protein FASTA has repeated headers: {', '.join(duplicates)}. "
+            f"Each record needs its own Protein_Specie_ID, otherwise the topology of one "
+            f"sequence is reported for another. Rename them and run again.")
+
     # Lists to store membrane topology classification results — FIX: exactly ONE entry per
     # DataFrame row. They used to be appended once per *matching protein record*, so an epitope
     # matching two records (or none) desynchronised the lists from the frame: pandas then either
@@ -167,9 +179,14 @@ def tmhmmAnalysis(args, dataframe):
             if len(protein_fields) > 1 and protein_fields[0] != idt[1]:
                 continue
 
-            # Ensure the epitope sequence is present in the protein sequence
+            # Ensure the epitope sequence is present in the protein sequence.
+            # Logged, not warned: with several records of the same protein/species this fires for
+            # every one that does not carry the epitope, including the perfectly normal case
+            # where a later record does. The warning that matters — no record carried it at all —
+            # is raised once, below. A warning per non-match trains people to ignore warnings.
             if epitope not in seq_polyprot:
-                warnings.warn(f"Epitope {idt_epitope} is not found in the protein(s) FASTA file. Please check your sequences.")
+                logger.debug("%s POA2/topology | %s not found in %s", TAG_DATA, idt_epitope,
+                             seq_polyprot_id)
                 continue
 
             # Validate epitope position values

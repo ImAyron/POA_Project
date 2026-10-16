@@ -295,8 +295,12 @@ def run_poa2(args) -> Poa2Result:
             run.warn("%d epitope(s) matched no protein in the -f FASTA and have '-' in the "
                      "Portion_* columns; check the header conventions.", unresolved)
 
-        # Save results to an Excel file (create the output directory if needed)
-        xlsx_path = f"{path}_{args.t}.xlsx"
+        # The file name carries the operator as well as the threshold. '>=' and '<' are opposite
+        # questions — conserved epitopes versus unique ones — and naming both results after the
+        # threshold alone made the second run overwrite the first without a word. 'ge'/'lt'
+        # because '>' and '<' are not legal in a Windows file name.
+        criterion = "ge" if type_symbol == ">=" else "lt"
+        xlsx_path = f"{path}_{criterion}{args.t}.xlsx"
         os.makedirs(os.path.dirname(xlsx_path) or ".", exist_ok=True)
         POA2_df.to_excel(xlsx_path, sheet_name=f"{type_symbol}{args.t}", startcol=0, index=False)
         run.note("spreadsheet written: %s", xlsx_path)
@@ -304,8 +308,11 @@ def run_poa2(args) -> Poa2Result:
         # Generate FASTA file if requested
         fasta_path = None
         if (args.rf) is not None:
-            fasta_out.getfastafile(path, args.rf, POA2_df)
-            fasta_path = f"{path}.fasta"
+            # Same reasoning, plus the region filter: -rf 1 (outside) and -rf 3 (inside) select
+            # disjoint epitope sets and used to land on one file name.
+            stem = f"{path}_{criterion}{args.t}_rf{args.rf}"
+            fasta_out.getfastafile(stem, args.rf, POA2_df)
+            fasta_path = f"{stem}.fasta"
             run.note("FASTA written (-rf %s): %s", args.rf, fasta_path)
 
         run.result(selected=len(POA2_df), criterion=f"{type_symbol}{args.t}")

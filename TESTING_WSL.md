@@ -193,8 +193,9 @@ cd ~/POA_Project
 python POA2_v1.0.py -g True -t 70 -d ~/poa_test/csvs -f ~/poa_test/proteins.fasta -r ~/poa_test/poa2 -rf 0
 ls ~/poa_test/poa2
 ```
-`>>> esperado:` `POA2_analysis_70.xlsx` (com colunas Portion_Outside/TM/Inside) e
-`POA2_analysis.fasta`. Se aparecer `pyTMHMM não instalado`, volte ao passo 2.
+`>>> esperado:` `POA2_analysis_ge70.xlsx` (com colunas Portion_Outside/TM/Inside) e
+`POA2_analysis_ge70_rf<N>.fasta`. O nome carrega o operador (`ge` = `-g`, `lt` = `-l`) e o
+`-rf`, para que duas perguntas opostas no mesmo limiar nao gravem no mesmo arquivo. Se aparecer `pyTMHMM não instalado`, volte ao passo 2.
 
 ---
 
@@ -220,7 +221,7 @@ python POA1_v1.0.py -p ~/poa_test/pap.txt -f ~/poa_test/proteins.fasta -d ~/poa_
 `>>> esperado:` `pap.txt` com blocos `>SPIKE_SARS_NP1` + linhas `n<TAB>ini<TAB>peptídeo<TAB>fim`,
 e o POA1 rodando sem erro.
 
-### 5.2 API MHC-II do IEDB (precisa de internet) — **confirmar as colunas**
+### 5.2 API MHC-II do IEDB (precisa de internet) — **colunas confirmadas em 11/10/2026**
 ```bash
 cd ~/POA_Project
 python - <<'PY'
@@ -233,11 +234,29 @@ print("=== 1a linha de dados ===")
 print(linhas[1] if len(linhas) > 1 else "(sem dados)")
 PY
 ```
-`>>> esperado:` uma linha de cabeçalho separada por TAB. **Compare** os nomes de colunas com
-`REQUIRED_COLUMNS` em `poa/services/mhcii_client.py` (`allele, seq_num, start, end, method,
-peptide, smm_align_ic50, nn_align_ic50, nn_align_rank, nn_align_adjusted_rank`). Se algum nome
-diferir (ex.: `ic50` em vez de `nn_align_ic50`), me mande o cabeçalho real que eu ajusto o
-mapeamento em `_ALIASES` — o normalizador já cobre variações comuns, mas convém confirmar.
+`>>> esperado:` uma linha de cabeçalho separada por TAB.
+
+**Resultado da verificação (11/10/2026, 222 aa do domínio Gc do Oropouche, resposta em 1,8 s).**
+A API devolve nomes **diferentes** dos que o parser espera:
+
+```
+allele  seq_num  start  end  length  core_peptide  peptide  ic50  rank  adjusted_rank
+```
+
+Ou seja: `ic50` no lugar de `nn_align_ic50`, `rank` no lugar de `nn_align_rank`, e sem as colunas
+`method` e `smm_align_ic50`. **O `_ALIASES` já cobre isso** — depois de `normalize_tsv` o arquivo
+sai com o esquema que o parser pede:
+
+```
+allele  seq_num  start  end  method  peptide  smm_align_ic50  nn_align_ic50  nn_align_rank  nn_align_adjusted_rank
+```
+
+Cadeia conferida até o fim: `predict` → `write_result_file` → `files_map_MHCIIBD` →
+`MHCIIAntigenEpitopes` deu **32 epítopos** com `-mic 50` e **123** com `-mic 500`, com `Specie` e
+`Protein` lidos do nome do arquivo (`GcHead_OROV.html`). Nada a ajustar.
+
+> Se um dia a API mudar de novo, o sintoma é um `KeyError` de coluna no parser; o conserto é
+> acrescentar o nome novo à lista certa em `_ALIASES`, em `poa/services/mhcii_client.py`.
 
 ### 5.3 BepiPred-3.0 local (opcional, pesado — baixa pesos ESM-2 ~GB)
 ```bash
