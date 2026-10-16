@@ -188,6 +188,19 @@ def run_poa0(args):
         region = db.Region(name=db._entry_name(entry), start=1, end=len(sequence),
                            source="completa", description="sequencia inteira")
 
+    # Python slicing is silent about out-of-range bounds: sequence[4999:6000] of a 1420-aa protein
+    # is "". Without this check POA0 wrote a header with no sequence under it, recorded
+    # "tamanho: 0" and exited 0, and POA1 then ran on an empty reference. It is reachable both
+    # from a typo in -r and from an InterPro region whose end exceeds the UniProt sequence the
+    # entry now carries (version skew between the two databases).
+    if not 1 <= region.start <= region.end <= len(sequence):
+        raise SystemExit(
+            f"A regiao {region.start}-{region.end} ({region.source}) nao cabe em {accession}, que "
+            f"tem {len(sequence)} residuos. Use -l regioes para ver os limites validos."
+            + ("" if region.source == "manual" else
+               " Se a regiao veio de uma base externa, ela pode estar descrita sobre outra versao "
+               "da sequencia."))
+
     sub_sequence = sequence[region.start - 1:region.end]
     report["regiao"] = asdict(region)
 
@@ -212,13 +225,25 @@ def run_poa0(args):
                 region.source, region.start, region.end)
 
     # --- structure -----------------------------------------------------------------------
+    # The report is written whatever happens here. fetch_structure raises ServiceUnavailable for
+    # an entry that exists only as mmCIF, and for any PDBe/RCSB outage; letting that escape before
+    # the dump left the FASTA on disk with no record of the region and offset it came from, which
+    # is the one thing the downstream steps need. A failed download is recorded and re-raised
+    # after, so the exit code still says the run did not do everything it was asked to.
+    structure_error: Optional[BaseException] = None
     if args.estrutura:
-        _add_structure(args, accession, region, report)
+        try:
+            _add_structure(args, accession, region, report)
+        except Exception as exc:  # noqa: BLE001 - recorded, written down, then re-raised
+            structure_error = exc
+            report["estrutura_erro"] = f"{type(exc).__name__}: {exc}"
 
     report_path = os.path.join(args.d, REPORT_NAME)
     with open(report_path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, ensure_ascii=False, default=_json_default)
     report["arquivos"]["relatorio"] = report_path
+    if structure_error is not None:
+        raise structure_error
     return report
 
 

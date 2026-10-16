@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from Bio import SeqIO
@@ -56,6 +57,15 @@ def csv_columns(operator: str = "<=", threshold=100) -> List[str]:
 #: Legacy alias — the IEDB default header (``<= 100%``), kept for callers that predate the
 #: threshold-aware header.
 CSV_COLUMNS = csv_columns()
+
+
+def _comparable_count(row: dict) -> Optional[int]:
+    """The denominator a ``conservancy_rows`` row reported, read back from its percent cell."""
+    for key, value in row.items():
+        if key.startswith("Percent"):
+            match = re.search(r"\(\d+/(\d+)\)", str(value))
+            return int(match.group(1)) if match else None
+    return None
 
 
 def max_identity(epitope: str, protein: str) -> Optional[float]:
@@ -302,9 +312,18 @@ def run_conservancy_for_dir(
             step.result(epitopes=len(epitopes), proteins=len(pairs), csv=out_name)
             step.detail("comparison set: %s", origin)
         written.append(out_path)
+        # The denominator the CSV actually used, per epitope, is 'comparable' — proteins shorter
+        # than the epitope are left out. Recording only len(pairs) made the metadata contradict
+        # the file next to it: a set of 2 with one short protein wrote "100.00% (1/1)" while the
+        # sidecar said n_proteins=2, and the 100/n grid that POA2's -m warning and the step-5
+        # table derive from the sidecar was wrong by that difference.
+        comparable_counts = sorted({_comparable_count(row) for row in rows} - {None})
         species_meta[specie] = {
             "csv": out_name,
             "n_proteins": len(pairs),
+            "n_comparable": comparable_counts[0] if len(comparable_counts) == 1 else None,
+            "n_comparable_range": [comparable_counts[0], comparable_counts[-1]]
+                                  if len(comparable_counts) > 1 else None,
             "n_epitopes": len(epitopes),
             "origin": origin,
             "discriminating": len(pairs) > 1,

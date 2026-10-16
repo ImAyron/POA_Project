@@ -1,3 +1,77 @@
+# Revisão do PR #2 — 16/10/2026
+
+Revisão do POA0, da verificação estrutural e das correções das etapas 4 e 5. Diferente das
+revisões anteriores, esta foi **medida**: a suíte e os casos abaixo rodaram no ambiente conda
+`poa` da WSL (`conda run -n poa python -m pytest`), não apenas lidos.
+
+Suíte antes: 312 passando. Depois das correções: **318 passando**.
+
+## O que o PR acerta
+
+- A descoberta do **PDB 4C23** é real: duas análises de DENV usaram como estrutura a L-fuculose
+  quinase de *S. pneumoniae*, com 0 dos 19 epítopos presentes. Há ferramenta para reproduzir.
+- O desenho do guard está certo onde importa — identidade por alinhamento e não janela
+  deslizante, numeração real do arquivo em vez de 1-based presumido, recorte ao observado em vez
+  de extrapolação, falha fechada em cadeia vazia, e na recusa a estrutura é mostrada **sem**
+  destaque em vez de escondida.
+- `validate_conservancy.py` endereça a pendência mais antiga do projeto.
+- A exclusão de análise está corretamente contida: caminhos resolvidos, `..`/symlink/absoluto
+  barrados, `cache` e raiz recusados, confirmação por nome.
+- Os `warnings.warn` do `topology.py` passaram a chegar ao `poa.log` via `captureWarnings` —
+  fechando uma lacuna que a revisão de 08/10 tinha deixado registrada.
+
+## Correções aplicadas
+
+| Problema (medido) | Correção |
+|---|---|
+| **O guard aprovava a estrutura errada.** A identidade é uma razão sobre as colunas alinhadas, e a aprovação só exigia `columns > 0`. Com os dois gaps terminais livres, o alinhador descarta quase toda a estrutura como sobra e guarda um trecho curto bem pareado. Medição: de 216 pares de sequências sem relação, **1 foi aceito a 100% de identidade sobre uma única coluna** — 0,7% de uma estrutura de 150 resíduos contra referência de 500 aa | Piso de cobertura `DEFAULT_MIN_COVERAGE = 0.50`: a identidade só vale se a estrutura tiver alinhado em pelo menos metade do seu comprimento. O caso legítimo — cristal de um domínio de poliproteína — continua passando, e há teste para os dois lados |
+| `min_identity` era ignorado na rota SIFTS: a comparação usava a constante do módulo, então `check_structure.py -i 90` não tinha efeito na única rota que o POA0 usa para estruturas que ele baixa | O argumento é propagado e honrado nas duas rotas |
+| **`-r` fora dos limites gerava FASTA vazio e saía com código 0.** `sequence[4999:6000]` de uma proteína de 1420 aa é `""`; o POA0 escrevia cabeçalho sem sequência, registrava `tamanho: 0`, e o POA1 rodava sobre referência vazia | Validação `1 <= start <= end <= len(sequence)` com mensagem que distingue erro de digitação de região descrita sobre outra versão da sequência |
+| **`max_identity` passou a devolver `None` e um chamador não foi atualizado:** `best_world_match` fazia `max(ident for ...)` e levantava `TypeError` quando o primeiro registro de um world FASTA estava vazio — caso que a etapa 1 já avisa que acontece | O arquivo não pontuável é registrado em `WARN` e pulado |
+| Falha no download da estrutura destruía o relatório: `_add_structure` rodava antes do `json.dump`, então o FASTA ficava no disco sem registro da região e do offset de onde veio | O relatório é gravado sempre, com `estrutura_erro`, e a exceção é repropagada depois para o código de saída continuar dizendo que algo falhou |
+| O sidecar contradizia o CSV ao lado dele: gravava `n_proteins: 2` enquanto o CSV dizia `100.00% (1/1)`, e é do sidecar que a grade de 100/n do aviso do `-m` e da tabela da etapa 5 é derivada | Passa a gravar também `n_comparable` — o denominador que o CSV de fato usou |
+
+## Pendências deixadas para decisão, não corrigidas
+
+**O denominador da conservância diverge do IEDB.** Excluir do denominador as proteínas mais curtas
+que o epítopo é defensável, e a justificativa no docstring é boa — mas o IEDB usa
+`matched / |conjunto|`. Isso torna o resultado local **não equivalente** ao do site, e a própria
+`tools/validate_conservancy.py` vai reportar divergência em qualquer conjunto com fragmentos
+curtos, imprimindo "não use os números locais". Não alterei: é decisão científica, não defeito.
+Ou se alinha ao IEDB, ou se documenta a divergência e se ajusta o validador.
+
+Residual relacionado: quando `comparable == 0` a linha sai `0.00% (0/0)` com
+`Minimum identity 0.00%` — a mesma falha que o docstring diz corrigir.
+
+## Fragilidades apontadas e não corrigidas neste commit
+
+Confirmadas por leitura, fora do escopo destas correções:
+
+- **O caminho SIFTS é código morto.** `dbsearch` calcula e grava `offset_regiao`, mas nem a
+  interface nem `check_structure.py` passam `sifts_offset=`. Enquanto isso a etapa 1 afirma ao
+  usuário que "a estrutura baixada aqui já vem com o mapeamento SIFTS… que é o que a etapa 7 usa".
+  A afirmação é falsa como está ligado.
+- **O destaque é pintado em todas as cadeias.** Verifica-se uma cadeia, mas o `chain` é omitido da
+  seleção do 3Dmol quando o campo está vazio — os números de resíduo vão para todo parceiro de um
+  complexo. É um resíduo do próprio problema que o PR corrige.
+- **Só uma cadeia é examinada, escolhida por ordem no arquivo.** Num complexo antígeno-anticorpo
+  com H/L primeiro, o antígeno nunca é tentado e uma estrutura boa é recusada.
+- **Outage de API é indistinguível de "sem dados"**: 404, 429, 500, 503 e timeout viram a mesma
+  exceção, e três chamadores a convertem em `[]` logando "nenhuma estrutura conhecida".
+- **Apagar a análise recém-fechada falha no Windows** — o `FileHandler` do `poa.log` fica aberto e
+  o `rmtree` bate em `WinError 32`. No Linux o unlink funciona, então o teste não pega.
+- **Quatro avisos novos quebram a gramática de log** (`logger.warning` sem o prefixo
+  `WARN <etapa> |`), então `grep 'WARN'` e `grep 'POA2/'` não os encontram.
+- **Nome de saída do POA2 ainda sobrescreve** quando só `-m`, `-imin`, `-imax` ou `-idf` mudam.
+- `pdb_id` é interpolado em caminho e URL sem validar formato; `--limite` é ignorado por três dos
+  quatro modos de listagem; `database_client` não usa a camada de cache e a interface dispara duas
+  requisições idênticas a `best_structures` por clique; nenhum teste exercita `_get_json`, então
+  nada verifica que um 4xx/5xx vira `ServiceUnavailable`.
+- **Higiene:** um `.docx` de 40 KB foi commitado sem estar no `.gitignore`; README e MUDANCAS ainda
+  dizem "155 testes".
+
+---
+
 # Revisão do POA — 08/10/2026
 
 Leitura completa do repositório (objetivo, camadas, documentação e suíte) seguida de duas

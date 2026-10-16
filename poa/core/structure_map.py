@@ -33,6 +33,16 @@ logger = get_logger("structmap")
 # the mapping is refused rather than offered with a caveat.
 DEFAULT_MIN_IDENTITY = 0.70
 
+# ...and below this fraction of the structure actually aligning, the identity is not evidence of
+# anything. Identity alone is a ratio over the aligned columns, so one matching residue out of a
+# 150-residue chain scores 100%. Both end gaps are free (see _aligner), which is right for a
+# structure covering part of a longer protein, but it also lets the aligner discard almost the
+# whole structure as overhang and keep a tiny high-scoring overlap. Measured on this branch: of
+# 216 pairs of unrelated random sequences, one was accepted at 100% identity over a single
+# aligned column (0.7% of a 150-residue structure against a 500-aa reference) — exactly the
+# wrong-structure case this module exists to refuse.
+DEFAULT_MIN_COVERAGE = 0.50
+
 THREE_TO_ONE = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q", "GLU": "E",
     "GLY": "G", "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F",
@@ -267,7 +277,8 @@ def map_epitopes(
     struct_seq = "".join(r.letter for r in residues)
 
     if sifts_offset is not None:
-        _map_by_sifts(report, residues, ref_seq, struct_seq, ranges, sifts_offset, sifts_span)
+        _map_by_sifts(report, residues, ref_seq, struct_seq, ranges, sifts_offset, sifts_span,
+                      min_identity)
     else:
         _map_by_alignment(report, residues, ref_seq, struct_seq, ranges, min_identity)
 
@@ -275,7 +286,8 @@ def map_epitopes(
     return report
 
 
-def _map_by_sifts(report, residues, ref_seq, struct_seq, ranges, offset, span):
+def _map_by_sifts(report, residues, ref_seq, struct_seq, ranges, offset, span,
+                  min_identity=DEFAULT_MIN_IDENTITY):
     """Exact path: SIFTS already states the correspondence, so only verify and shift."""
     report.method = "sifts"
     by_number = {r.number: r for r in residues}
@@ -292,7 +304,7 @@ def _map_by_sifts(report, residues, ref_seq, struct_seq, ranges, offset, span):
     report.identity = matches / columns if columns else 0.0
     report.aligned_columns = columns
 
-    if report.identity < DEFAULT_MIN_IDENTITY:
+    if report.identity < min_identity:
         # SIFTS said these correspond, yet the residues disagree: the reference sequence is not
         # the one the structure was solved from (a different isolate, or the wrong region).
         report.ok = False
@@ -321,17 +333,33 @@ def _map_by_sifts(report, residues, ref_seq, struct_seq, ranges, offset, span):
             f"a estrutura mostra menos residuos do que o epitopo tem.")
 
 
-def _map_by_alignment(report, residues, ref_seq, struct_seq, ranges, min_identity):
+def _map_by_alignment(report, residues, ref_seq, struct_seq, ranges, min_identity,
+                      min_coverage=DEFAULT_MIN_COVERAGE):
     """Fallback path: no SIFTS mapping, so derive the correspondence from the sequences."""
     index_map, identity, columns = align_sequences(ref_seq, struct_seq)
     report.identity = identity
     report.aligned_columns = columns
+    coverage = columns / len(struct_seq) if struct_seq else 0.0
 
     if identity < min_identity or not columns:
         report.ok = False
         report.warnings.append(
             f"A estrutura tem {identity * 100:.1f}% de identidade com a sequencia usada nas "
             f"predicoes (minimo {min_identity * 100:.0f}%). Provavelmente e outra proteina: "
+            f"destacar os epitopos produziria uma figura sem significado.")
+        return
+
+    # Identity passed, but over how much? The ratio is taken over the aligned columns alone, so a
+    # handful of them can read 100% while the rest of the chain was discarded as end gap. A
+    # structure of the right protein aligns over most of its length; one that only overlaps in a
+    # few residues is not evidence, whatever the ratio says.
+    if coverage < min_coverage:
+        report.ok = False
+        report.warnings.append(
+            f"Apenas {columns} dos {len(struct_seq)} residuos da estrutura "
+            f"({coverage * 100:.1f}%) alinharam com a sequencia usada nas predicoes, abaixo do "
+            f"minimo de {min_coverage * 100:.0f}%. A identidade de {identity * 100:.1f}% e "
+            f"calculada so sobre esses residuos, entao nao diz que a estrutura e desta proteina: "
             f"destacar os epitopos produziria uma figura sem significado.")
         return
 
