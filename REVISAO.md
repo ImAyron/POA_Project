@@ -1,3 +1,60 @@
+# Recarregar uma análise — 16/10/2026
+
+Reabrir uma análise passou a devolver **todos** os arquivos dela à etapa em que foram usados.
+Suíte: de 318 para **343 passando**, executada no ambiente conda `poa` da WSL.
+
+## O problema
+
+`_resume_from_results` cobria só a etapa 5: CSVs de conservância, o `-f` e a tabela do POA1, atrás
+de um botão. Tudo o mais ficava no disco com a interface mostrando campo vazio — os arquivos de
+predição da etapa 2, os conjuntos de comparação por espécie da etapa 4, a estrutura da etapa 7.
+Continuar uma análise significava reenviar o que ela já continha.
+
+## A decisão de desenho
+
+O nome do arquivo **não diz de que etapa ele veio**. Um FASTA de referência e um de "outros
+preditores" são ambos FASTAs em `inputs/`; um arquivo que a pessoa nomeou não segue convenção
+nenhuma; e o POA0 escreve `<PROT>_<ESPECIE>.fasta`, que é indistinguível de uma referência enviada
+à mão. Inferir pelo nome seria adivinhação.
+
+Por isso a procedência é **gravada na chegada**, em `input_history.json` na pasta da análise:
+papel, método, espécie, nome original e quando entrou. Os oito pontos de upload da interface
+passam a registrar, e o POA0 registra o que ele mesmo escreve.
+
+Dois pontos que valem registro:
+
+- **Caminhos relativos à pasta da análise.** A mesma pasta é aberta do Windows e da WSL, onde o
+  caminho absoluto é outro; gravar o absoluto de um lado tornaria o registro inútil do outro.
+- **O histórico nunca é condição para salvar.** O arquivo é gravado primeiro; falhar ao registrar
+  a linha de procedência vira `WARN` e segue. Perder uma linha de histórico vale menos que perder
+  o upload.
+
+## Análises que já estavam no disco
+
+Essas não têm registro, e são justamente as que o pedido quer recarregar. Para elas há
+classificação por nome (`_classify_legacy_input`), que é **melhor esforço** — a interface avisa
+quando foi esse o caminho e pede para conferir. O histórico sempre vence o nome quando ambos
+existem; há teste para esse caso, com um arquivo cujo nome diria uma coisa e o registro diz outra.
+
+## Um defeito encontrado pelo próprio teste
+
+O MHC-II é o único método que o POA1 consome como **pasta** de `Proteína_Espécie.html`, não como
+arquivo. Cada HTML é registrado individualmente — isso é a procedência correta — mas a primeira
+versão devolvia os caminhos individuais, e o POA1 teria recebido um arquivo onde espera um
+diretório. Corrigido: a etapa recebe a pasta de volta.
+
+## Testes
+
+- `tests/test_restore_analysis.py` (23 casos): o registro em si, caminhos relativos, sem
+  duplicatas, histórico ilegível ignorado, salvar sem papel não grava nada; a restauração por
+  etapa, arquivo apagado do disco sai da restauração, análise vazia; e 12 casos parametrizados da
+  classificação por nome, mais a precedência do histórico sobre o nome.
+- `tests/test_gui_app_runs.py` (2 casos novos, via `AppTest`): reabrir pela interface e encontrar
+  cada arquivo na sua etapa; e a restauração acontecendo **uma vez**, não a cada interação — repetir
+  desfaria o que a pessoa mexeu desde então.
+
+---
+
 # Revisão do PR #2 — 16/10/2026
 
 Revisão do POA0, da verificação estrutural e das correções das etapas 4 e 5. Diferente das

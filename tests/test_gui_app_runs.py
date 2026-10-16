@@ -88,3 +88,61 @@ def test_switching_analysis_clears_the_previous_one(results_root):
     assert at.session_state["run_path"] in (str(first.root), str(second.root))
     assert at.session_state["proteins_path"] is None
     assert at.session_state["conservancy_ready"] is False
+
+
+def test_reopening_an_analysis_loads_its_files_onto_their_steps(results_root):
+    """
+    O pedido, de ponta a ponta: reabrir e encontrar tudo no lugar.
+
+    Reabrir restaurava só os CSVs de conservância e a referência, e atrás de um botão na etapa 5.
+    Os arquivos de predição enviados à mão na etapa 2, o conjunto de comparação da etapa 4 e a
+    estrutura da etapa 7 ficavam no disco enquanto a interface mostrava campos vazios.
+    """
+    ctx = backend.create_run(results_root, "Teste reabrir", date(2026, 10, 16))
+    backend.save_upload(ctx.inputs_dir, "ref_0_prot.fasta", b">NS1_DENV1_ref\nMKTAYIAKQRQ\n",
+                        ctx=ctx, role="reference", original_name="prot.fasta")
+    backend.save_upload(ctx.inputs_dir, "others_0_ep.fasta", b">NS1_DENV1_OTHER_1_5\nMKTAY\n",
+                        ctx=ctx, role="prediction", method="x", original_name="ep.fasta")
+    backend.save_upload(ctx.inputs_dir, "comparison_DENV1.fasta", b">NS1_DENV1_w\nMKTAYIAKQRQ\n",
+                        ctx=ctx, role="comparison_set", specie="DENV1", original_name="w.fasta")
+    backend.save_upload(ctx.inputs_dir, "structure_1ABC.pdb", b"ATOM\nEND\n",
+                        ctx=ctx, role="structure", original_name="1abc.pdb")
+
+    at = _start()
+    next(b for b in at.button if "Abrir" in b.label).click().run()
+
+    assert not at.exception
+    assert at.session_state["run_path"] == str(ctx.root)
+    # cada arquivo na etapa de onde veio
+    assert at.session_state["ref_raw"][0].endswith("ref_0_prot.fasta")
+    assert at.session_state["proteins_path"]
+    assert at.session_state["poa1_sources"]["x"][0].endswith("others_0_ep.fasta")
+    assert at.session_state["comparison_sets"]["DENV1"].endswith("comparison_DENV1.fasta")
+    assert at.session_state["pdb_path"].endswith("structure_1ABC.pdb")
+    # e a barra lateral diz o que voltou
+    assert at.session_state["restored_source"] == "history"
+    assert any("Etapa 2" in line for line in at.session_state["restored_summary"])
+
+
+def test_restoring_runs_once_not_on_every_interaction(results_root):
+    """
+    Depois da adoção, o estado da sessão é a autoridade.
+
+    Repetir a restauração a cada reexecução desfaria o que a pessoa mexeu desde então — por
+    exemplo, readicionaria um arquivo de predição que ela acabou de limpar.
+    """
+    ctx = backend.create_run(results_root, "Teste uma vez", date(2026, 10, 16))
+    backend.save_upload(ctx.inputs_dir, "others_0_ep.fasta", b">NS1_DENV1_OTHER_1_5\nMKTAY\n",
+                        ctx=ctx, role="prediction", method="x", original_name="ep.fasta")
+
+    at = _start()
+    at = next(b for b in at.button if "Abrir" in b.label).click().run()
+    assert at.session_state["poa1_sources"]["x"]
+    assert at.session_state["restore_pending"] is False
+
+    # o usuário limpa a fonte e interage de novo; a restauração não pode trazê-la de volta
+    at.session_state["poa1_sources"] = {}
+    at = at.sidebar.radio[0].set_value("2 · Predições (auto/manual)").run()
+
+    assert not at.exception
+    assert at.session_state["poa1_sources"] == {}

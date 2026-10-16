@@ -20,7 +20,7 @@ import pandas as pd
 
 from ..core import pipeline
 from ..core.models import STANDARD_COLUMNS
-from ..logging_conf import get_logger
+from ..logging_conf import TAG_WARN, get_logger
 from ..services import realdata_import
 from ..services.cache import Cache
 
@@ -400,12 +400,233 @@ def topology_summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({"region": list(means.keys()), "mean_fraction": list(means.values())})
 
 
-def save_upload(dest_dir: Path, filename: str, data: bytes) -> str:
-    """Persist an uploaded file's bytes to ``dest_dir/filename`` and return the path."""
+def save_upload(dest_dir: Path, filename: str, data: bytes, *,
+                ctx: Optional["WorkContext"] = None, role: str = "", method: str = "",
+                specie: str = "", original_name: str = "") -> str:
+    """
+    Persist an uploaded file's bytes to ``dest_dir/filename`` and return the path.
+
+    Pass ``ctx`` together with ``role`` to record *where in the interface this file came from*
+    (see :func:`record_input`). Without it the file is still written — the history is an
+    addition, never a precondition for saving.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     path = dest_dir / filename
     path.write_bytes(data)
+    if ctx is not None and role:
+        record_input(ctx, path, role=role, method=method, specie=specie,
+                     original_name=original_name or filename)
     return str(path)
+
+
+# --------------------------------------------------------------------------- input history
+#: Written in the analysis folder: which step each file came from, so reopening the analysis can
+#: put every one of them back where it was used instead of guessing from its name.
+INPUT_HISTORY_FILENAME = "input_history.json"
+
+
+def record_input(ctx: "WorkContext", path, *, role: str, method: str = "", specie: str = "",
+                 original_name: str = "") -> None:
+    """
+    Record that ``path`` entered the analysis as ``role`` (optionally for ``method``/``specie``).
+
+    People upload files by hand at several steps, and the file name alone does not say which step
+    asked for it: ``others_0_x.fasta`` and a reference FASTA are both FASTAs in ``inputs/``, and a
+    file the user named themselves carries no convention at all. Recording the provenance when the
+    file arrives is the only account that stays true, so reopening an analysis can return each
+    file to the exact step it was used in.
+
+    Paths are stored **relative to the analysis folder**: the same folder is opened from Windows
+    and from WSL, where its absolute path is different, and an absolute path recorded on one side
+    would be meaningless on the other.
+
+    Failure to write the history never interrupts the run — the file itself is already saved, and
+    losing a line of provenance is worth less than losing the upload.
+    """
+    entry = {
+        "path": _relative_to_run(ctx, path),
+        "role": role,
+        "method": method,
+        "specie": specie,
+        "original_name": original_name or Path(path).name,
+        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    history = [item for item in read_input_history(ctx) if item.get("path") != entry["path"]]
+    history.append(entry)
+    target = ctx.root / INPUT_HISTORY_FILENAME
+    try:
+        target.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("%s gui/history | could not record %s in %s: %s",
+                       TAG_WARN, entry["path"], INPUT_HISTORY_FILENAME, exc)
+
+
+def read_input_history(ctx: "WorkContext") -> List[Dict[str, str]]:
+    """The recorded provenance of this analysis's files; ``[]`` when there is none or it is unreadable."""
+    target = ctx.root / INPUT_HISTORY_FILENAME
+    if not target.is_file():
+        return []
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("%s gui/history | ignoring an unreadable %s: %s",
+                       TAG_WARN, INPUT_HISTORY_FILENAME, exc)
+        return []
+    return [item for item in data if isinstance(item, dict) and item.get("path")]
+
+
+def _relative_to_run(ctx: "WorkContext", path) -> str:
+    """``<run>/inputs/x.fasta`` -> ``inputs/x.fasta``; an outside path is kept as given."""
+    try:
+        return Path(path).resolve().relative_to(Path(ctx.root).resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+#: How a file in ``inputs/`` is classified when the analysis predates the history file. Matched in
+#: order against the name, first hit wins. This is a fallback, not the contract: the names come
+#: from the save sites in ``app.py``, and an analysis recorded by :func:`record_input` is read back
+#: from that record instead. It exists because analyses already on disk have no history to read.
+_LEGACY_INPUT_PATTERNS: Tuple[Tuple[str, str, str], ...] = (
+    # (prefix, role, method)
+    ("proteins_all", "merged_reference", ""),
+    ("proteins_normalized", "merged_reference", ""),
+    ("ref_", "reference", ""),
+    ("comparison_", "comparison_set", ""),
+    ("structure_", "structure", ""),
+    ("bepipred3", "prediction", "b3"),
+    ("pap", "prediction", "p"),
+    ("netctl", "prediction", "n"),
+    ("others", "prediction", "x"),
+    ("raw_", "bepipred2_raw", ""),
+)
+
+
+def _classify_legacy_input(name: str) -> Tuple[str, str]:
+    """``(role, method)`` for a file in ``inputs/`` of an analysis with no recorded history."""
+    lowered = name.lower()
+    if lowered.endswith("_b2.json"):
+        return "bepipred2_adapted", "b2"
+    if lowered.endswith("_ref.fasta"):
+        return "bepipred2_reference", ""
+    for prefix, role, method in _LEGACY_INPUT_PATTERNS:
+        if lowered.startswith(prefix):
+            return role, method
+    # POA0 writes '<PROT>_<SPECIE>.fasta' with no prefix of its own, and a hand-named reference
+    # looks the same; both are references, which is the only role an unprefixed FASTA has here.
+    if lowered.endswith((".fasta", ".fa", ".faa")):
+        return "reference", ""
+    return "", ""
+
+
+@dataclass
+class RestoredAnalysis:
+    """Everything a reopened analysis could put back, and where it came from."""
+
+    references: List[str] = field(default_factory=list)      # step 1, as uploaded/generated
+    merged_reference: Optional[str] = None                   # step 1, the single -f
+    prediction_files: Dict[str, List[str]] = field(default_factory=dict)   # step 2, by method
+    prepared_b2: List[object] = field(default_factory=list)   # step 2, adapter records
+    comparison_sets: Dict[str, str] = field(default_factory=dict)          # step 4, by species
+    structure: Optional[str] = None                           # step 7
+    conservancy_csvs: List[str] = field(default_factory=list)  # step 4
+    poa1_result: Optional[object] = None                      # step 3
+    source: str = "none"                                      # 'history' | 'inferred' | 'none'
+
+    @property
+    def anything(self) -> bool:
+        return bool(self.references or self.merged_reference or self.prediction_files
+                    or self.prepared_b2 or self.comparison_sets or self.structure
+                    or self.conservancy_csvs)
+
+    def summary(self) -> List[str]:
+        """Human lines describing what was restored, for the interface to show."""
+        lines = []
+        if self.merged_reference or self.references:
+            lines.append(f"Etapa 1: {len(self.references) or 1} FASTA(s) de proteínas")
+        for method, files in sorted(self.prediction_files.items()):
+            lines.append(f"Etapa 2 ({method}): {len(files)} arquivo(s)")
+        if self.prepared_b2:
+            lines.append(f"Etapa 2 (b2): {len(self.prepared_b2)} JSON(s) adaptado(s)")
+        if self.poa1_result is not None:
+            lines.append(f"Etapa 3: {len(self.poa1_result.predictions)} epítopo(s)")
+        if self.comparison_sets:
+            lines.append("Etapa 4: conjunto de comparação de "
+                         + ", ".join(sorted(self.comparison_sets)))
+        if self.conservancy_csvs:
+            lines.append(f"Etapa 4: {len(self.conservancy_csvs)} CSV(s) de conservância")
+        if self.structure:
+            lines.append(f"Etapa 7: estrutura {Path(self.structure).name}")
+        return lines
+
+
+def restore_analysis(ctx: "WorkContext") -> RestoredAnalysis:
+    """
+    Recover every input of an analysis folder, each tagged with the step it belongs to.
+
+    Reopening an analysis used to restore only the conservancy CSVs and the reference, behind a
+    button on step 5. Everything else — the prediction files people upload by hand at step 2, the
+    per-species comparison sets of step 4, the structure of step 7 — stayed on disk while the
+    interface showed empty fields, so continuing a run meant uploading it all again.
+
+    The provenance recorded by :func:`record_input` is the source of truth. An analysis created
+    before that record existed is classified by name instead (:func:`_classify_legacy_input`),
+    which is best-effort: it is why the result carries ``source``.
+    """
+    restored = RestoredAnalysis()
+    history = read_input_history(ctx)
+    restored.source = "history" if history else "inferred"
+
+    if history:
+        classified = [(ctx.root / item["path"], item.get("role", ""), item.get("method", ""),
+                       item.get("specie", "")) for item in history]
+    else:
+        classified = []
+        for path in sorted(ctx.inputs_dir.glob("*")) if ctx.inputs_dir.is_dir() else []:
+            if path.is_file():
+                role, method = _classify_legacy_input(path.name)
+                classified.append((path, role, method, ""))
+
+    adapted: Dict[str, Path] = {}
+    for path, role, method, specie in classified:
+        if not path.is_file():
+            continue            # the file was deleted after being recorded
+        text = str(path)
+        if role == "reference":
+            restored.references.append(text)
+        elif role == "merged_reference":
+            restored.merged_reference = text
+        elif role == "prediction" and method == "m":
+            # MHC-II is the one method POA1 takes as a *directory* of Protein_Specie.html files.
+            # Each file is recorded on its own — that is the provenance — but the input the step
+            # has to offer back is the folder, so the individual paths are not what is restored.
+            pass
+        elif role == "prediction" and method:
+            restored.prediction_files.setdefault(method, []).append(text)
+        elif role == "comparison_set":
+            key = specie or path.stem.replace("comparison_", "").upper()
+            restored.comparison_sets[key] = text
+        elif role == "structure":
+            restored.structure = text
+        elif role == "bepipred2_adapted":
+            adapted[path.name[: -len("_b2.json")]] = path
+
+    # The adapter's two files are one record: pair them back up by their shared stem.
+    for stem, b2_path in sorted(adapted.items()):
+        prepared = realdata_import.prepared_from_disk(
+            str(b2_path), str(ctx.inputs_dir / f"{stem}_ref.fasta"))
+        if prepared is not None:
+            restored.prepared_b2.append(prepared)
+
+    # MHC-II is a directory of HTML files, not one upload, so it is read as such.
+    if ctx.mhcii_dir.is_dir() and any(ctx.mhcii_dir.glob("*.htm*")):
+        restored.prediction_files.setdefault("m", [str(ctx.mhcii_dir)])
+
+    if ctx.conservancy_csv_dir.is_dir():
+        restored.conservancy_csvs = [str(p) for p in sorted(ctx.conservancy_csv_dir.glob("*.csv"))]
+
+    restored.poa1_result = poa1_result_from_disk(ctx)
+    return restored
 
 
 # --------------------------------------------------------------------------- multi-species merging

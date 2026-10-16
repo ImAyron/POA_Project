@@ -102,6 +102,12 @@ def _init_state():
     ss.setdefault("params_mhcii", {})      # step 2: IEDB alleles and peptide length
     ss.setdefault("params_viz", {})        # step 7: 3D representation controls
     ss.setdefault("pdb_path", None)        # step 7: the uploaded structure, kept by path
+    # Reopening an analysis loads its files back onto their own steps. The flag survives the
+    # rerun that follows adoption, because the analysis context does not exist yet when the
+    # button is clicked; the summary is kept so the sidebar can say what came back.
+    ss.setdefault("restore_pending", False)
+    ss.setdefault("restored_summary", [])
+    ss.setdefault("restored_source", "none")
     # Step 1, POA0 search. Each answer narrows the next question, so the intermediate listings
     # are kept: re-querying UniProt on every rerun would make the form unusable.
     ss.setdefault("poa0_taxa", [])         # candidate organisms for the typed name
@@ -176,7 +182,57 @@ def _reset_analysis_state():
 def _adopt_run(path: Path):
     ss.run_path = str(path)
     _reset_analysis_state()
+    ss.restore_pending = True      # the files are loaded on the next run, once ctx is bound
     st.rerun()
+
+
+def _restore_analysis_files(context):
+    """
+    Put every file of a reopened analysis back on the step it was used in.
+
+    Reopening used to restore only the conservancy CSVs and the reference, behind a button on
+    step 5. Everything else stayed on disk while the interface showed empty fields, so continuing
+    an analysis meant uploading by hand what the analysis already contained.
+
+    Runs once per adoption, not on every rerun: after it the session state is the authority, and
+    repeating it would undo edits made since — re-adding a prediction file the user has just
+    cleared, for instance.
+    """
+    restored = backend.restore_analysis(context)
+    if not restored.anything:
+        ss.restored_summary = []
+        return
+
+    if restored.references:
+        ss.ref_raw = restored.references
+        ss.ref_uploads = list(restored.references)
+    ss.prepared_b2 = list(restored.prepared_b2)
+    for method, files in restored.prediction_files.items():
+        ss.poa1_sources.setdefault(method, list(files))
+    ss.comparison_sets.update(restored.comparison_sets)
+    if restored.structure:
+        ss.pdb_path = restored.structure
+    if restored.poa1_result is not None:
+        ss.poa1_result = restored.poa1_result
+    if restored.conservancy_csvs:
+        ss.conservancy_ready = True
+        # The threshold and operator belong to the CSVs, not to the form: read them back the same
+        # way step 5 does, so a reopened analysis does not sit on the initial default.
+        source = conservancy_parser.inspect_directory(str(context.conservancy_csv_dir))
+        if source.threshold is not None:
+            ss.threshold = int(source.threshold)
+        if source.operator:
+            ss.cons_operator = (">=" if conservancy_parser.operator_family(source.operator) == "ge"
+                                else "<")
+
+    # _refresh_reference merges whatever is now in ref_uploads + prepared_b2 into the single -f.
+    # The recorded merge is only adopted when there is nothing to rebuild it from, so a reopened
+    # analysis ends up with the same -f the original session had.
+    _refresh_reference()
+    if not ss.proteins_path and restored.merged_reference:
+        ss.proteins_path = restored.merged_reference
+    ss.restored_summary = restored.summary()
+    ss.restored_source = restored.source
 
 
 def _full_reset():
@@ -315,6 +371,13 @@ st.sidebar.caption("Pipeline de Otimização de Antígenos")
 
 ctx = _select_run()
 
+# Adoption happens before ctx exists, so the actual loading waits for here — the first rerun in
+# which the analysis folder is bound. Clearing the flag first means a failure to restore cannot
+# put the session in a loop that retries on every interaction.
+if ss.restore_pending:
+    ss.restore_pending = False
+    _restore_analysis_files(ctx)
+
 STEPS = [
     "1 · Proteínas & Parâmetros",
     "2 · Predições (auto/manual)",
@@ -337,6 +400,14 @@ with st.sidebar:
     st.write(f"{_status_icon(ss.poa1_result is not None)} POA1 executado")
     st.write(f"{_status_icon(ss.conservancy_ready)} Conservancy pronta")
     st.write(f"{_status_icon(ss.poa2_result is not None)} POA2 executado")
+    if ss.restored_summary:
+        with st.expander(f"📂 {len(ss.restored_summary)} item(ns) recarregados", expanded=False):
+            for line in ss.restored_summary:
+                st.caption(line)
+            if ss.restored_source == "inferred":
+                st.warning("Esta análise é anterior ao registro de procedência, então os arquivos "
+                           "foram classificados pelo nome. Confira se cada um está na etapa certa; "
+                           "a partir desta execução a origem passa a ser gravada.")
     st.divider()
     # Keyed so it shows up in session state and is therefore cleared by _full_reset — an unkeyed
     # radio keeps its selection internally, and "Nova análise" would land on whatever step the
@@ -476,8 +547,15 @@ def _poa0_search_panel():
             # ambiguous-residue check, the merge into -f — treats it identically.
             if fasta not in ss.ref_raw:
                 ss.ref_raw = list(ss.ref_raw) + [fasta]
+            # POA0 writes these itself rather than going through save_upload, so they are recorded
+            # here — otherwise reopening the analysis would have to guess what they are from a
+            # name POA0 composed ('<PROT>_<SPECIE>.fasta' looks like any other FASTA).
+            backend.record_input(ctx, fasta, role="reference",
+                                 original_name=Path(fasta).name)
             if report["arquivos"].get("estrutura"):
                 ss.pdb_path = report["arquivos"]["estrutura"]
+                backend.record_input(ctx, ss.pdb_path, role="structure",
+                                     original_name=Path(ss.pdb_path).name)
 
             st.success(f"`{Path(fasta).name}` gerado: {report['sequencia']['tamanho']} aa, "
                        f"cabeçalho `{report['cabecalho']}`.")
@@ -501,7 +579,8 @@ def step_inputs():
     ups = st.file_uploader("FASTA de proteínas (-f)", type=["fasta", "fa", "faa", "txt"],
                            accept_multiple_files=True, help=HELP["proteins_fasta"])
     if ups:
-        ss.ref_raw = [backend.save_upload(ctx.inputs_dir, f"ref_{i}_{u.name}", u.getvalue())
+        ss.ref_raw = [backend.save_upload(ctx.inputs_dir, f"ref_{i}_{u.name}", u.getvalue(),
+                                         ctx=ctx, role="reference", original_name=u.name)
                       for i, u in enumerate(ups)]
 
     swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `denv1_ns1`) — inverter "
@@ -596,7 +675,8 @@ def _automate_bepipred3():
     with st.status("Executando BepiPred-3.0 (local)…", expanded=True) as status:
         try:
             res = bepipred_client.predict(ss.proteins_path, cache=ctx.cache())
-            path = backend.save_upload(ctx.inputs_dir, "bepipred3.fasta", res.content.encode("utf-8"))
+            path = backend.save_upload(ctx.inputs_dir, "bepipred3.fasta", res.content.encode("utf-8"),
+                                       ctx=ctx, role="prediction", method="b3")
             ss.poa1_sources["b3"] = [path]
             ss.poa1_sources.pop("b2", None)
             ss.prepared_b2 = []
@@ -611,7 +691,8 @@ def _automate_antigenic():
         try:
             res = antigenic_client.predict(ss.proteins_path, cache=ctx.cache())
             pap_txt = antigenic_client.to_pap_txt(res.content, ss.proteins_path)
-            path = backend.save_upload(ctx.inputs_dir, "pap_antigenic.txt", pap_txt.encode("utf-8"))
+            path = backend.save_upload(ctx.inputs_dir, "pap_antigenic.txt", pap_txt.encode("utf-8"),
+                                       ctx=ctx, role="prediction", method="p")
             ss.poa1_sources["p"] = [path]
             status.update(label=f"EMBOSS antigenic concluído ({res.source}).", state="complete")
         except (ServiceUnavailable, ServiceError) as exc:
@@ -662,7 +743,8 @@ def _import_bepipred2_original():
     raw = st.file_uploader("BepiPred-2.0 (.json)", type=["json"], key="up_b2_raw",
                            help=HELP["b2_json"])
     if raw is not None:
-        raw_path = backend.save_upload(ctx.inputs_dir, f"raw_{raw.name}", raw.getvalue())
+        raw_path = backend.save_upload(ctx.inputs_dir, f"raw_{raw.name}", raw.getvalue(),
+                                        ctx=ctx, role="bepipred2_raw", original_name=raw.name)
         try:
             keys = backend.antigen_keys(raw_path)
             bad = backend.nonconforming_antigen_keys(raw_path)
@@ -749,7 +831,8 @@ def _manual_upload(label: str, key: str, types, filename: str):
     if ups:
         stem = filename.rsplit(".", 1)[0]
         ss.poa1_sources[key] = [
-            backend.save_upload(ctx.inputs_dir, f"{stem}_{i}_{up.name}", up.getvalue())
+            backend.save_upload(ctx.inputs_dir, f"{stem}_{i}_{up.name}", up.getvalue(),
+                                ctx=ctx, role="prediction", method=key, original_name=up.name)
             for i, up in enumerate(ups)
         ]
         st.success(f"{label}: {len(ups)} arquivo(s) — " + ", ".join(u.name for u in ups))
@@ -852,7 +935,8 @@ def step_predictions():
                                help=HELP["mhcii_upload"])
         if ups:
             for up in ups:
-                backend.save_upload(ctx.mhcii_dir, up.name, up.getvalue())
+                backend.save_upload(ctx.mhcii_dir, up.name, up.getvalue(),
+                                    ctx=ctx, role="prediction", method="m", original_name=up.name)
             ss.poa1_sources["m"] = [str(ctx.mhcii_dir)]
             st.success(f"{len(ups)} arquivo(s) MHC-II carregado(s).")
 
@@ -1034,7 +1118,8 @@ def step_conservancy():
                                   help=HELP["comparison_set"])
             if up is not None:
                 ss.comparison_sets[sp] = backend.save_upload(
-                    ctx.inputs_dir, f"comparison_{sp}.fasta", up.getvalue())
+                    ctx.inputs_dir, f"comparison_{sp}.fasta", up.getvalue(),
+                    ctx=ctx, role="comparison_set", specie=sp, original_name=up.name)
             chosen = ss.comparison_sets.get(sp)
             if chosen:
                 n_comp = len(backend.parse_fasta_headers(chosen))
@@ -1464,7 +1549,8 @@ def step_viz():
         # straight from the widget instead of being saved: leaving step 7 and returning dropped
         # the structure and the 3D view with it. Saved like every other input and kept by path.
         ss.pdb_path = backend.save_upload(ctx.inputs_dir, f"structure_{pdb_up.name}",
-                                          pdb_up.getvalue())
+                                          pdb_up.getvalue(), ctx=ctx, role="structure",
+                                          original_name=pdb_up.name)
     if ss.pdb_path and not Path(ss.pdb_path).is_file():
         ss.pdb_path = None     # the analysis folder was cleaned up under us
 
