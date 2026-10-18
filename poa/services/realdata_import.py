@@ -199,11 +199,12 @@ def prepare_bepipred2(
             species.append(entry.specie)
     stem = "-".join(species) if mapping else specie
 
-    b2_path = os.path.join(out_dir, f"{stem}_b2.json")
+    from ..core.artifacts import safe_child
+    b2_path = str(safe_child(out_dir, f"{stem}_b2.json"))
     with open(b2_path, "w") as fh:
         json.dump(data, fh)
 
-    ref_path = os.path.join(out_dir, f"{stem}_ref.fasta")
+    ref_path = str(safe_child(out_dir, f"{stem}_ref.fasta"))
     with open(ref_path, "w") as fh:
         for key, entry in zip(new_antigens, entries):
             fh.write(f">{key}\n{entry.sequence}\n")

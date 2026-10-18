@@ -15,8 +15,10 @@ The *local reimplementation* that generates such results lives in
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+from pathlib import Path
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -24,6 +26,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from ...logging_conf import get_logger
+from ..artifacts import file_hash, safe_child
 
 logger = get_logger("conservancy")
 
@@ -132,27 +135,85 @@ class ConservancyMeta:
     species: Dict[str, dict] = field(default_factory=dict)
     generated_at: str = ""
     version: int = 1
+    files: Optional[Dict[str, str]] = None  # relative CSV path -> SHA-256; None for legacy data
 
     @property
     def family(self) -> str:
         return operator_family(self.operator)
 
 
-def write_metadata(directory: str, threshold, operator: str, source: str = "local",
+def _csv_header(path) -> Optional[List[str]]:
+    """Column names of a CSV, or ``None`` when it cannot be read."""
+    try:
+        return list(pd.read_csv(path, nrows=0).columns)
+    except (OSError, ValueError, pd.errors.ParserError) as exc:
+        logger.warning("Could not read the header of %s: %s", path, exc)
+        return None
+
+
+def _batch_inventory(directory: str, species: Dict[str, dict]) -> Dict[str, str]:
+    """
+    SHA-256 of every CSV the batch being recorded produced, keyed by path relative to ``directory``.
+
+    The caller knows what it produced: a local run names each species' CSV, and that list is the
+    inventory. Only a declaration *about* a directory (a manual upload, an IEDB download — no
+    species) has to look at the directory, and even then a file that carries no "percent of
+    matches" column is not a conservancy result: inventorying the researcher's own ``notas.csv``
+    would turn editing it into a hard stop in :func:`inspect_directory`, and therefore in steps 4,
+    5 and 7, with no way back but regenerating the whole batch. Left out, it reaches POA2 through
+    :func:`stale_csvs` instead, which names it and says what to do about it.
+    """
+    declared = list(dict.fromkeys(str(info.get("csv")) for info in species.values()
+                                  if info.get("csv")))
+    if declared:
+        return {name: file_hash(safe_child(directory, name)) for name in declared}
+    root = Path(directory)
+    return {Path(p).relative_to(root).as_posix(): file_hash(p)
+            for p in map_EpConservFiles(directory)
+            if any(parse_percent_column(c) is not None for c in (_csv_header(p) or []))}
+
+
+def write_metadata(directory: str, threshold: float, operator: str, source: str = "local",
                    species: Optional[Dict[str, dict]] = None) -> str:
     """Record the threshold/operator that produced a directory of CSVs; returns the file path."""
+    species = dict(species or {})
+    threshold = float(threshold)
+    if not math.isfinite(threshold) or not 0 <= threshold <= 100:
+        raise ValueError("Invalid conservancy threshold: expected a finite percentage in [0, 100].")
+    if not operator_family(operator):
+        raise ValueError(f"Invalid conservancy operator: {operator!r}")
     meta = ConservancyMeta(
-        threshold=float(threshold),
+        threshold=threshold,
         operator=str(operator),
         source=source,
-        species=dict(species or {}),
+        species=species,
         generated_at=datetime.now().isoformat(timespec="seconds"),
+        version=2,
+        files=_batch_inventory(directory, species),
     )
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, METADATA_FILENAME)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(asdict(meta), fh, ensure_ascii=False, indent=2)
     return path
+
+
+def _read_inventory(value) -> Optional[Dict[str, str]]:
+    """
+    The ``files`` mapping of a sidecar read from disk, or ``None`` when it records none.
+
+    Raises ``TypeError`` on anything else, so that a hand-edited (or foreign-version)
+    ``"files": ["A.csv"]`` is rejected where :func:`read_metadata` already handles an unusable
+    sidecar, instead of escaping as an ``AttributeError`` from ``meta.files.items()`` — which the
+    callers of :func:`inspect_directory` do not catch, and which reaches the user as a traceback.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not all(
+            isinstance(name, str) and isinstance(digest, str) for name, digest in value.items()):
+        raise TypeError("'files' must map each CSV name to its SHA-256, "
+                        f"not {type(value).__name__}: {value!r}")
+    return dict(value)
 
 
 def read_metadata(directory: str) -> Optional[ConservancyMeta]:
@@ -170,6 +231,7 @@ def read_metadata(directory: str) -> Optional[ConservancyMeta]:
             species=dict(data.get("species") or {}),
             generated_at=str(data.get("generated_at", "")),
             version=int(data.get("version", 1)),
+            files=_read_inventory(data.get("files")),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.warning("Ignoring unreadable %s in %s: %s", METADATA_FILENAME, directory, exc)
@@ -195,25 +257,38 @@ def inspect_directory(directory: str) -> ConservancySource:
     """
     Read back the threshold/operator behind a directory of conservancy CSVs.
 
-    The sidecar metadata wins when present (we wrote it, so it is unambiguous); otherwise the
-    header of the CSVs themselves is parsed, which is what an IEDB download carries.
+    Metadata must agree with every declared CSV header and with recorded file hashes.
     """
     files = map_EpConservFiles(directory)
     meta = read_metadata(directory)
-    if meta is not None:
-        return ConservancySource(len(files), meta.threshold, meta.operator, "meta", meta)
-
     declared = set()
     for path in files:
-        try:
-            columns = pd.read_csv(path, nrows=0).columns
-        except (OSError, ValueError, pd.errors.ParserError) as exc:
-            logger.warning("Could not read the header of %s: %s", path, exc)
+        columns = _csv_header(path)
+        if columns is None:
             continue
         for column in columns:
             parsed = parse_percent_column(column)
             if parsed is not None and parsed[1] is not None:
                 declared.add(parsed)
+                # By family, not by symbol: an IEDB export spells the same criterion '<=' where
+                # POA2 writes '<', and comparing the literals would reject a directory the rest
+                # of this module — check_threshold below included — declares compatible.
+                if meta is not None and (
+                    abs(parsed[1] - meta.threshold) > 1e-6
+                    or (parsed[0] and meta.family
+                        and operator_family(parsed[0]) != meta.family)
+                ):
+                    raise ValueError(f"CSV header threshold/operator in {path} does not match "
+                                     f"{METADATA_FILENAME}: {parsed} vs {meta.operator}{meta.threshold}.")
+    if meta is not None:
+        if not math.isfinite(meta.threshold) or not 0 <= meta.threshold <= 100:
+            raise ValueError("Invalid threshold in conservancy metadata.")
+        if meta.files is not None:
+            current = {Path(p).relative_to(Path(directory)).as_posix(): p for p in files}
+            for name, digest in meta.files.items():
+                if name not in current or file_hash(current[name]) != digest:
+                    raise ValueError(f"Conservancy CSV {name} is missing or changed since metadata was recorded.")
+        return ConservancySource(len(files), meta.threshold, meta.operator, "meta", meta)
     if len(declared) == 1:
         operator, threshold = declared.pop()
         return ConservancySource(len(files), threshold, operator, "header")
@@ -277,6 +352,7 @@ def map_EpConservFiles(directory):
     """Retrieve file paths for all CSV files in ``directory`` and subdirectories."""
     EpConservFiles = []
     for folders, subfolders, files in os.walk(directory):
+        subfolders[:] = [d for d in subfolders if not d.startswith(".poa_")]
         for file in files:
             path_file = os.path.join(folders, file)
             path_file = str(path_file)
@@ -368,8 +444,13 @@ def stale_csvs(directory: str) -> List[str]:
     meta = read_metadata(directory)
     if meta is None:
         return []
-    produced = {str(info.get("csv", "")) for info in (meta.species or {}).values()}
-    found = {os.path.basename(p) for p in map_EpConservFiles(directory)}
+    if meta.files is not None:
+        produced = set(meta.files)
+    elif meta.species:
+        produced = {str(info.get("csv", "")) for info in meta.species.values()}
+    else:
+        return []  # legacy manual metadata had no inventory, not an empty inventory
+    found = {Path(p).relative_to(Path(directory)).as_posix() for p in map_EpConservFiles(directory)}
     return sorted(found - produced)
 
 

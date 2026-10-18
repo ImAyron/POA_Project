@@ -48,12 +48,15 @@ def files_map_MHCIIBD(directory):
         tuple: Lists of species, protein names, and file paths.
     """
     specie, protein, MHCII_files = [], [], []
-    for _, _, files in os.walk(directory):
-        for file in files:
-            if file.endswith(".html"):
-                path_file = os.path.join(directory, file)
+    for folder, subdirs, files in os.walk(directory):
+        subdirs[:] = sorted(d for d in subdirs if not d.startswith(".poa_"))
+        for file in sorted(files):
+            if file.lower().endswith(".html"):
+                path_file = os.path.join(folder, file)
                 MHCII_files.append(path_file)
-                infos = file.replace(".html", "").upper().split("_")
+                infos = os.path.splitext(file)[0].upper().split("_")
+                if len(infos) < 2 or not all(infos):
+                    raise ValueError(f"Invalid MHC-II filename {file!r}: expected Protein_Specie[_ID].html")
                 protein.append(infos[0])
                 specie.append(infos[1])
                 # Concatenate remaining parts if available for sequence ID
@@ -61,7 +64,7 @@ def files_map_MHCIIBD(directory):
     return specie, protein, MHCII_files
 
 
-def MHCIIAntigenEpitopes(df, specie, protein, allele_class, ic50):
+def MHCIIAntigenEpitopes(df, specie, protein, allele_class, ic50, reference_id="-"):
     """
     Filters and formats MHC-II predicted epitopes data (NN_align by default) by IC50 and HLA type.
     """
@@ -88,7 +91,7 @@ def MHCIIAntigenEpitopes(df, specie, protein, allele_class, ic50):
     # Construct final DataFrame
     final_df = nn_df[["specie", "protein", "allele", "start", "end", "peptide"]].copy()
     final_df.insert(0, "Method", "MHCII-Binding")
-    final_df.insert(3, "ID_Sequence", "-")
+    final_df.insert(3, "ID_Sequence", reference_id)
 
     # Standardize column names
     final_df.rename(columns={

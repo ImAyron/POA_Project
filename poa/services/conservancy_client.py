@@ -25,11 +25,13 @@ import csv
 import io
 import os
 import re
+from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from Bio import SeqIO
 
-from ..core.parsers.conservancy import operator_family, percent_column, write_metadata
+from ..core.parsers.conservancy import operator_family, percent_column, write_metadata, map_EpConservFiles
+from ..core.artifacts import staged_outputs
 from ..logging_conf import get_logger, log_step
 
 # distinct from the parser's 'poa.conservancy': both modules log about conservancy, and with the
@@ -226,6 +228,27 @@ def group_proteins_by_specie(
 
 
 def run_conservancy_for_dir(
+    poa1_conservancy_dir, proteins, threshold, out_dir,
+    specie_proteins=None, per_specie=True, operator=">=",
+):
+    """Publish a fresh CSV batch after every species has completed successfully."""
+    root = Path(out_dir)
+    # This directory represents one comparison batch. Preserve older CSVs in history,
+    # including manual uploads, rather than silently combining them with new results.
+    managed = {Path(p).relative_to(root).parts[0] for p in map_EpConservFiles(str(root))}
+    managed.add("conservancy_meta.json")
+    # An empty batch is a result here, not a body that gave up: when POA1 left no
+    # *_epitopes.fasta there is nothing to compare, and the previous batch describes species
+    # that no longer exist. It goes to history so POA2 cannot merge it into the current run.
+    with staged_outputs(root, managed, publish_empty=True) as stage:
+        paths = _run_conservancy_for_dir(
+            poa1_conservancy_dir, proteins, threshold, str(stage),
+            specie_proteins, per_specie, operator)
+        names = [Path(p).name for p in paths]
+    return [str(root / name) for name in names]
+
+
+def _run_conservancy_for_dir(
     poa1_conservancy_dir: str,
     proteins: str | Sequence[Tuple[str, str]],
     threshold: float,
@@ -329,6 +352,10 @@ def run_conservancy_for_dir(
             "discriminating": len(pairs) > 1,
         }
 
+    # A batch that produced no CSV has no threshold to declare. Recording one anyway leaves a
+    # described directory with an empty inventory: step 5 stops asking which threshold the data
+    # came from, POA2 filters nothing and labels the empty sheet 'conserved >= T%'. With no
+    # sidecar the directory reads as 'unknown', which is what it is, and the interface asks.
     if written:
         write_metadata(out_dir, threshold, operator, source="local", species=species_meta)
     return written

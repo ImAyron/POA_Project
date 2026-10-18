@@ -121,6 +121,9 @@ def test_resuming_adopts_the_threshold_recorded_with_the_csvs(results_root, monk
     POA1 table but not the threshold, so the session kept the 70 from ``setdefault`` while the
     CSVs on disk had been produced at another value.
     """
+    # Generate actual >=90 CSVs; changing only metadata is now correctly rejected.
+    for path in (results_root / "conservancy_csv").glob("*.csv"):
+        path.write_text(path.read_text().replace(">= 70%", ">= 90%"))
     cons_parser.write_metadata(str(results_root / "conservancy_csv"), 90, ">=", source="local")
     (results_root / "inputs").mkdir(exist_ok=True)
     (results_root / "inputs" / "proteins_all.fasta").write_text(">E_SP_p1\nGGAYIAMGG\n")
