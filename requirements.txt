@@ -1,0 +1,52 @@
+# ==========================================================================
+# POA — Pipeline de Otimização de Antígenos — Python dependencies
+# ==========================================================================
+# Install (recommended, cross-platform):
+#   python -m venv .venv && . .venv/bin/activate    # Windows: .venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# Some external predictors are NOT pip packages and are documented separately:
+#   * EMBOSS `antigenic` (replaces the offline PAP/IMED site) — install via conda/WSL/Docker:
+#       conda install -c bioconda emboss
+#   * BepiPred-3.0 local model — heavy (PyTorch + ESM-2), install on demand:
+#       pip install bp3
+#   * NetCTL 1.2 / BepiPred-2.0 have no API/Windows binary — automated via browser (Playwright)
+#     with manual upload as fallback.
+# --------------------------------------------------------------------------
+
+# --- core pipeline logic (already used by the original POA) ---
+pandas>=1.4          # epitope matrices, filtering, xlsx export
+numpy>=1.21          # numeric support for the BepiPred JSON parser
+biopython>=1.79      # SeqIO — FASTA parsing throughout the pipeline
+openpyxl>=3.0        # engine behind pandas.DataFrame.to_excel (was an implicit dependency)
+# pyTMHMM is installed separately for POA2 topology; see TESTING_WSL.md section 2.
+# Keeping it optional lets the GUI, POA1 and CSV previews install without a native compiler.
+
+# --- external-service integration (new) ---
+requests>=2.28       # HTTP client for the IEDB MHC-II REST API
+
+# --- graphical interface (new) ---
+# The floor is set by the layout API, not by a feature: the GUI passes width="stretch"/"content",
+# which replaced use_container_width. Streamlit's docs describe the parameter but never say which
+# release added it, so this is the conservative side of the deprecation wave rather than the exact
+# first version — an older Streamlit raises TypeError on every table and chart.
+streamlit>=1.50      # local web GUI orchestrating the full pipeline
+plotly>=5.18         # interactive charts of the selected epitopes in the GUI
+# py3Dmol wraps the 3Dmol.js library: it builds HTML that the *browser* renders, so the viewer
+# also needs internet at render time (3Dmol.js comes from a CDN) — an offline machine shows an
+# empty panel rather than an error. Imported lazily and only by step 7, so the rest of the GUI,
+# the CLI and the tests run without it. See the "Visualização dos epítopos" section of README.md.
+py3Dmol>=2.0         # 3D molecular viewer in the GUI (epitopes highlighted on a PDB)
+
+# --- browser automation for tools without an API (new, optional) ---
+# Needed only for automating NetCTL 1.2 / BepiPred 2.0 web forms. After installing, run:
+#   playwright install chromium
+playwright>=1.40
+
+# --- development / tests ---
+pytest>=7.0          # unit tests for the parsers and ranking/filtering logic
+
+# --- documentation build (optional) ---
+# Only needed to regenerate MUDANCAS.pdf via `python tools/md2pdf.py MUDANCAS.md MUDANCAS.pdf`
+# (printing is done by a headless Edge/Chrome already installed on the machine).
+markdown>=3.5

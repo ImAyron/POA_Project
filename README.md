@@ -1,231 +1,330 @@
 # POA: Pipeline de Otimização de Antígenos (Antigen Optimization Pipeline)
 
-### English
-This is the English version of the README. For the Portuguese (PT-BR) version, please refer to the section below.
+Esta é a versão em **português (PT-BR)**, a principal deste repositório.
+A versão em inglês está [ao final do documento](#english).
 
-## 1. INTRODUCTION
+## 0. AUTOMAÇÃO E INTERFACE GRÁFICA (v1.1)
 
-High-throughput screening, genomic sequence analysis of pathogenic organisms, and reverse vaccinology techniques have revolutionized the rapid development of vaccines and diagnostic tests. In this context, in silico approaches, such as multi-epitope construction, have become indispensable for designing biotechnological products and immunotherapeutic interventions against viral, bacterial, and parasitic diseases ([Dar et al., 2021](https://www.nature.com/articles/s41598-021-90868-2); [Enayatkhani et al., 2021](https://www.tandfonline.com/doi/full/10.1080/07391102.2020.1756411?casa_token=Ctu83G9J4aEAAAAA%3Aocl_27U5qwcFn-WXSFZIaaSmChfq-hC5ggb281Z1hGuocFuOXH65acPngTeO6HavrexguLxkdEbfAVQ); [Shey et al., 2019](https://www.nature.com/articles/s41598-019-40833-x)).
+> Esta versão acrescenta uma camada opcional de automação e uma interface gráfica **sem alterar a
+> lógica científica de ranqueamento e seleção de epítopos**. A linha de comando original continua
+> funcionando exatamente como antes. O projeto completo e a estratégia de automação de cada
+> ferramenta estão documentados em [`ARCHITECTURE.md`](ARCHITECTURE.md). O relatório detalhado de
+> tudo que mudou está em [`MUDANCAS.md`](MUDANCAS.md) — também disponível como
+> [`MUDANCAS.pdf`](MUDANCAS.pdf).
 
-The Antigen Optimization Pipeline (POA, in Portuguese version) is a semi-automated Python-based pipeline designed to analyze, organize, retrieve, and screen epitopes derived from antigenic peptide predictions using various web-based tools. POA integrates results from B cell, cytotoxic T cell (Tc), and T helper (Th) cell epitope prediction tools to identify optimal antigenic targets and construct a comprehensive antigen database. Additionally, POA enables the identification of conserved epitopes across species using the [Epitope Conservancy Analysis - IEDB](http://tools.iedb.org/conservancy) tool and characterizes epitope localization in transmembrane regions through the [pyTMHMM](https://github.com/bosborne/pyTMHMM) tool. By integrating these approaches, POA identifies high-potential candidates within viral proteins, driving advancements in integrative therapeutic interventions. This capability provides innovative strategies to tackle the global burden of zoonotic and vector-borne diseases, paving the way for the development of targeted vaccines and immunotherapies.
+**Organização do pacote** (refatorado em camadas; os scripts da raiz tornaram-se pontos de entrada
+finos): `poa/core` (parsing + lógica do pipeline, sem rede) · `poa/services` (ferramentas externas) ·
+`poa/cli` (POA1/POA2, mesmos argumentos) · `poa/gui` (aplicação Streamlit).
 
-### 1.1 Antigenic peptide prediction
-
-POA optimizes the organization and visualization of in silico epitope prediction results, enabling more efficient analysis of large datasets. It also optimizes the screening process by identifying unique or shared epitopes within a group of organisms and characterizing epitopes exposed on membrane structures (Batista et al., 2025).
-
-Supported Prediction Tools:
-
-* B cell epitopes: [Bepipred 2.0](https://services.healthtech.dtu.dk/service.php?BepiPred-2.0) and [Predicted Antigenic Peptides (PAP) - IMED](http://imed.med.ucm.es/Tools/antigenic.pl).
-
-* Tc epitopes: [NetCTL - 1.2](https://services.healthtech.dtu.dk/service.php?NetCTL-1.2).
-
-* Th epitopes: [MHC-II Binding Predictions](http://tools.iedb.org/mhcii/).
-
-POA is also capable of analyzing results from additional prediction tools, provided the data is formatted into standardized FASTA files (see Section 3.1.1 POA1 - Input files).
-
-## 2. INSTALLATION
-
-POA v1.0 must be installed manually. Ensure all dependencies are installed for proper functionality. The required dependencies are:
-
-* Python version > 3.6.0
-* Pandas version >= 1.4.0
-* Numpy version >= 1.21.4
-* Argparse version 1.4.0
-* Datetime version 4.4
-* Biopython version 1.79
-* Html version 1.16
-* Json
-* pyTMHMM (This package needs manual installation. Please follow the instructions in [pyTMHMM tool](https://github.com/bosborne/pyTMHMM)) 
-
-To install POA v1.0 on Linux, use the following command:
-
+**Instalação**
 ```
-git clone https://github.com/UbiratanBatista/POA_Project.git
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-## 3. USING THE POA PIPELINE
+Esse único comando já instala **tudo que o fluxo principal usa**, inclusive as bibliotecas da
+interface — `streamlit` (a interface), `plotly` (os gráficos) e **`py3Dmol`** (o visualizador 3D
+da etapa 7). Não há passo manual para nenhuma delas: se você instalou pelo `requirements.txt`, a
+visualização 3D já funciona. O `py3Dmol` também precisa de **internet no momento de visualizar**,
+porque a biblioteca JavaScript que ele usa vem de um CDN — veja
+[Visualização dos epítopos](#visualização-dos-epítopos-etapa-7).
 
-POA is a semi-automated pipeline, requiring some manual steps by the user. The pipeline consists of two main stages: POA1 and POA2.
+Extras que **não** são pacotes pip, ou são pesados demais para a instalação básica (instale apenas
+se quiser aquela automação):
+* **pyTMHMM** (topologia do POA2): instalação separada em Linux/WSL conforme
+  [`TESTING_WSL.md`](TESTING_WSL.md). A instalação básica permite usar a GUI, o POA1 e as prévias.
+* **EMBOSS `antigenic`** (substitui o site PAP/IMED, que saiu do ar; mesmo método Kolaskar–Tongaonkar):
+  `conda install -c bioconda emboss` (no Windows: WSL2 + conda, ou Docker).
+* Modelo local do **BepiPred-3.0** (PyTorch + ESM-2): `pip install bp3`.
+* **Automação de navegador** para NetCTL 1.2 / BepiPred-2.0: `pip install playwright && playwright install chromium`.
 
-The first stage of the pipeline, POA1, analyzes prediction results from epitope prediction tools (see Section 1.1 - Antigenic Peptide Prediction), creates an antigen database based on epitope ranking values, and organizes the results into multiple FASTA files for use in the next stage.
-
-Following this, the output files from POA1 should be submitted to the [Epitope Conservancy Analysis - IEDB](http://tools.iedb.org/conservancy) web platform. The conservancy analysis results are then processed by POA2, the second stage of the pipeline. POA2 evaluates epitopes with higher or lower conservancy (depending on the analysis objective) and performs transmembrane structure prediction using TMHMM. Ultimately, POA2 returns the conservancy analysis results along with the characterization of epitope localization in the membrane (external, transmembrane, or internal).
-
-### 3.1 POA1
-
-POA1 analyses prediction results from web tools, which may be in various formats, ranks epitopes based on tool-specific criteria, and generates a curated antigen database. The results are stored in standardized matrices and subsequently organized into multiple FASTA files for downstream analysis.
-
-#### 3.1.1 POA1 - Input files
-
-The first step is to perform predictions in the epitope prediction web tools (see section 1.1), following the protocols and parameters defined for each method and objective. POA1 accepts output files from various epitope prediction tools. Below are the specific requirements for each tool:
-
-##### 3.1.1.1 Bepipred 2.0
-
-Submit a ```.fasta``` file containing all proteins for analysis.
-
-Download the results as a ```.json``` file (JSON Summary).
-
-Example output:
-![Captura de tela de 2022-01-26 17-45-11](https://user-images.githubusercontent.com/72517648/151360191-20879962-26e7-4df5-a79e-1f9d79082c8d.png)
-
-*The result of the Bepipred 2.0 analysis is a web page (html) containing the proteins and the predicted antigenic regions (marked with E) in each sequence.
-
-##### 3.1.1.2 Predicting Antigenic Peptides (PAP) - IMED
-
-For the PAP tool, ensure each protein sequence is submitted separately, with the header formatted as " ```><protein>_<organism>...``` ". The prediction result will appear as follows:
-![Captura de tela de 2022-01-26 17-56-13](https://user-images.githubusercontent.com/72517648/151360188-21f130dd-ae97-4067-b7c9-8f138bff95bf.png)
-
-Copy the prediction table and paste it into a ```.txt``` file, adhering to the following format:
-![Captura de tela de 2022-01-26 17-58-37](https://user-images.githubusercontent.com/72517648/151360185-4a3b4863-5eab-4024-99d9-5105ac705e53.png)
-
-##### 3.1.1.3 NetCTL 1.2
-
-Submit a protein ```.fasta`` file for the NetCTL 1.2 analysis. The prediction result will appear as follows:
-![Captura de tela de 2022-01-26 18-02-17](https://user-images.githubusercontent.com/72517648/151360184-6091362a-bcb6-455f-b363-64e575096806.png)
-
-*The NetCTL 1.2 output is a web page (html) containing many peptides and those predicted to be antigenic (indicated with < - E). Save the results as an ```.html``` file (ATTENTION: ensure the page is fully loaded before saving).
-
-##### 3.1.1.4 MHC-II Binding Predictions
-
-Submit proteins individually to the MHCIIBP tool. The output will resemble the following:
-![Captura de tela de 2022-01-26 18-07-50](https://user-images.githubusercontent.com/72517648/151360180-72b31616-f40f-4bce-a78c-25124cffc675.png)
-
-The MHCIIBP result is an web page (select “Text file” under “Output format”) containing the predicted peptides, their scores as defined by the prediction algorithms, and additional relevant information. Save the results as ```.html``` files, ensuring the page is fully loaded before saving. Name the files as ```<protein>_<organism>.html``` or, for complete polyproteins, ```polyp_<organism>.html```. Organize all ```.html``` files into a **single folder (or directory)** for further processing.
-
-##### 3.1.1.5 Other Predictors
-
-Results from additional prediction tools can also be analyzed by POA, provided they are formatted into a standardized ```FASTA``` file. The file should be organized as follows:
+**Executar a interface gráfica** (fluxo guiado de 7 etapas: proteínas → predições → POA1 →
+conservação → POA2 → resultados → visualização):
 ```
-><protein>_<organism>_<predictor_method>_<NCBI_ID_if_any>_<start_position>_<end_position>
-Epitope 1
-
-><protein>_<organism>_<predictor_method>_<NCBI_ID_if_any>_<start_position>_<end_position>
-Epitope 2
+streamlit run poa/gui/app.py      # ou:  python run_gui.py
 ```
 
-#### 3.1.2 POA1 - Mandatory Arguments
-
-![3d](https://user-images.githubusercontent.com/72517648/151359262-9553ca42-63ad-4c9e-976f-0ac6704f49df.png)
-
-* **parameter -b2**: ```.json``` file containing the Bepipred 2.0 prediction results (see Section 3.1.1.1 Bepipred 2.0).
-* **parameter -b3**: ```.fasta``` file containing the Bepipred 3.0 prediction results.
-* **parameter -p**: ```.fasta``` file containing the PAP-IMED prediction results (see Section 3.1.1.2 Predicting Antigenic Peptides (PAP) - IMED).
-* **parameter -n**: ```.html``` file containing the NetCTL 1.2 analysis results (see Section 3.1.1.3 NetCTL 1.2).
-* **parameter -m**: Directory containing all ```.html``` files from the MHC-II Binding Predictions analysis (see Section 3.1.1.4 MHC-II Binding Predictions).
-* **parameter -x**: ```.fasta``` file containing results from any other predictor, formatted as specified (see Section 3.1.1.5 Other Predictors).
-
-**Note:** At least one epitope prediction result must be submitted (see Section 3.1.1 POA1 - Input files).
-
-In addition to the prediction results (parameters ```-b```, ```-p```, ```-m```,```-n```, and ```-x```), a ```.fasta``` file containing all proteins (or polyproteins) used for epitope prediction must be submitted (**parameter -f**). The file should follow the format below:
-
-For complete polyproteins:
+**Executar pela linha de comando** (inalterada):
 ```
->polyp_<organism_name1>_<NCBI_identifier1_if_any>...
-
-Amino_acid_sequence 1
-
->polyp_<organism_name2>_<NCBI_identifier2_if_any>...
-
-Amino_acid_sequence 2
+python POA1_v1.0.py -f proteins.fasta -d results -b3 bepipred3.fasta -e y
+python POA2_v1.0.py -g True -t 70 -d conservancy_csvs -f proteins.fasta -rf 1
 ```
 
-For individual proteins:
+**Arquivos originais da pesquisa** (adaptador de nomenclatura para os JSONs do BepiPred-2.0 do fluxo
+manual, que trazem a chave de antígeno genérica `Sequence`):
 ```
-><protein_name1>_<organism_name1>_<NCBI_identifier1_if_any>...
-
-Amino_acid_sequence 1
-
-><protein_name2>_<organism_name2>_<NCBI_identifier2_if_any>...
-
-Amino_acid_sequence 2
+python -m poa.cli.import_realdata --pred-dir <5_...> --world-dir <2_...> \
+    --out ./realdata_run --protein E --chikv-protein E1 --threshold 70 --run
 ```
-The header information is parsed using the separator symbol ("_") for analysis.
 
-Additionally, a folder MUST be designated to store the analysis results (**parameter -d**).
+**Status da automação por ferramenta** (verificado em 2026 — detalhes em `ARCHITECTURE.md`):
 
-#### 3.1.3 POA1 - Optional Arguments
+| Ferramenta | Estratégia | Fallback |
+|---|---|---|
+| MHC-II Binding (IEDB) | API REST (síncrona) | upload manual |
+| BepiPred-3.0 | pacote local `bp3` | upload manual |
+| PAP/IMED | EMBOSS `antigenic` local | upload manual |
+| Epitope Conservancy (IEDB) | **reimplementação local** (não existe API nem standalone) | upload manual do CSV |
+| NetCTL 1.2 / BepiPred-2.0 | automação de navegador (*best effort*) | upload manual |
+| pyTMHMM | local (inalterado) | — |
 
-![3d](https://user-images.githubusercontent.com/72517648/151359262-9553ca42-63ad-4c9e-976f-0ac6704f49df.png)
+Em todos os casos, se um serviço estiver indisponível o pipeline registra uma mensagem clara e
+permite o upload manual do arquivo de resultado, preservando o comportamento semiautomático original.
 
-* **parameter -bmin**: Minimum size for epitopes predicted by Bepipred (default = 0, no minimum size).
-* **parameter -bmax**: Maximum size for epitopes predicted by Bepipred (default = 0, no maximum size).
-* **parameter -pmin**: Minimum size for epitopes predicted by PAP - IMED (default = 0, no minimum size).
-* **parameter -pmax**: Maximum size for epitopes predicted by PAP - IMED (default = 0, no maximum size).
-* **parameter -mhla**: Type of HLA allele investigated in the MHC-II ligand analysis (options: HLA-DP, HLA-DQ, HLA-DR; default = DR).
-* **parameter -mic**: IC-50 threshold for the NN_align 2.3 algorithm used for epitope selection: IC50 < 50 nM (High-affinity binding to MHCII), IC50 < 500 nM (Intermediate affinity binding to MHCII), and IC50 < 5000 nM (Low-affinity binding to MHCII); Default = 50.
-* **parameter -xmin**: Minimum size for epitopes predicted by other predictors (default = 0, no minimum size).
-* **parameter -xmax**: Maximum size for epitopes predicted by other predictors (default = 0, no maximum size).
-* **parameter -e**: Option to export results as an Excel spreadsheet ```(.xlsx)``` in addition to the default ```.fasta``` files (default = n).
+### Visualização dos epítopos (etapa 7)
 
-#### 3.1.4 Running POA1
+Duas visualizações, com requisitos bem diferentes:
 
-Once the prediction result files are prepared, POA1 can be executed.
+**Mapa 2D** — os epítopos ao longo da sequência, uma trilha por proteína/espécie, colorida por
+método de predição. Usa apenas Plotly, que já vem no `requirements.txt`. Funciona offline e está
+sempre disponível quando o POA1 produziu epítopos.
 
-![2](https://user-images.githubusercontent.com/72517648/151359259-0473b328-cb54-423b-ac3c-f49cefc94213.png)
+**Estrutura 3D** — os epítopos destacados em vermelho sobre uma estrutura `.pdb` que você envia.
+Depende de **`py3Dmol`**, que é a camada Python sobre a biblioteca JavaScript **3Dmol.js**. O
+py3Dmol não renderiza nada por conta própria: ele monta um HTML que carrega o 3Dmol.js e manda o
+navegador desenhar.
 
-#### 3.1.5 POA1 - Output files
+> **O `py3Dmol` faz parte do `requirements.txt`** — ele é instalado junto com o resto pelo
+> `pip install -r requirements.txt`, **não** é um extra de instalação separada como o pyTMHMM ou
+> o EMBOSS. Se o seu ambiente foi montado antes de o visualizador 3D existir, ou instalando
+> pacote a pacote, rode `pip install -r requirements.txt` de novo para completá-lo —
+> ou, só para este: `pip install py3Dmol`.
 
-POA1 organizes the epitopes into ```.fasta``` files for submission to the Epitope Conservancy Analysis web tool. The epitopes are grouped by organism species, with all epitopes from a species stored in a single ```.fasta``` file named:
+Três coisas decorrem desse desenho e valem saber antes de usar:
 
-```<SpeciesID_epitope>.fasta```
+| Requisito | Por quê | O que acontece se faltar |
+|---|---|---|
+| **`py3Dmol` instalado** | É importado só na hora de renderizar, para que o resto da interface e os testes funcionem sem ele | A etapa 7 mostra um erro dizendo como instalar; o mapa 2D continua funcionando |
+| **Internet no momento de visualizar** | O 3Dmol.js vem de um CDN, carregado pelo navegador | O painel aparece vazio, **sem mensagem de erro** — nada é levantado do lado do Python |
+| **Que a estrutura seja da proteína analisada** | O destaque é feito por número de resíduo, e o 3Dmol.js colore o número que receber, venha ele de onde vier | A etapa 7 **recusa o destaque** e explica a incompatibilidade |
 
-For the conservancy analysis, these epitopes should be compared to protein sequences from other species. To avoid redundancy, it is recommended to create a ```.fasta``` file containing all proteins except those from the organism from which the epitopes were extracted. Using complete polyproteins for comparison is also suggested.
+A terceira era a que mais enganava, e agora é verificada em vez de apenas avisada. Antes de
+destacar qualquer coisa, a etapa 7 compara a sequência da estrutura com a sequência de referência
+daquela proteína/espécie (em `inputs/`) e remapeia as posições dos epítopos para a numeração que o
+arquivo realmente usa. Abaixo de 70% de identidade ela desenha a estrutura sem destaque nenhum e
+diz por quê.
 
-POA1 also generates an analysis report containing statistics on the analyzed epitopes, including: the total number of proteins, the total number of epitopes, and the proteins with the highest and lowest number of epitopes. Additionally, the pipeline provides the option to export the epitopes in ```.xlsx``` format (see Section 3.1.3 POA1 - Optional Arguments).
+Isso importa porque a falha é silenciosa. Uma análise de DENV1/DENV2 deste repositório usou como
+estrutura o PDB **4C23**, que é a **L-fuculose quinase de *Streptococcus pneumoniae*** — uma enzima
+bacteriana sem relação com dengue. Nenhuma das 19 sequências de epítopo existe naquela estrutura,
+mas as 19 posições caíam todas dentro da numeração da cadeia A (que vai de −5 a 467), então as 19
+eram pintadas de vermelho sem erro algum. Hoje a interface começa dizendo o que o arquivo contém
+(`L-FUCULOSE KINASE FUCK · STREPTOCOCCUS PNEUMONIAE`) e recusa o destaque a 25,0% e 30,0% de
+identidade.
 
-### 3.2 POA2
+Duas rotas resolvem a numeração, e a etapa 7 usa a que estiver disponível:
 
-After the [Epitope Conservancy Analysis - IEDB](http://tools.iedb.org/conservancy) tool processes the files generated by POA1, POA2 analyzes the conservancy data for each peptide. POA2 selects peptides based on user-defined conservancy thresholds and uses the [pyTMHMM](https://github.com/bosborne/pyTMHMM) tool to classify their membrane topology based on transmembrane helix predictions. The results are stored in ```.xlsx``` (spreadsheet) and ```.fasta``` files for further use.
+* **Mapeamento SIFTS**, quando a estrutura tem referência cruzada ao UniProt — exato. O POA0 grava
+  o deslocamento no `POA0_relatorio.json` quando você baixa a estrutura com `--estrutura`.
+* **Alinhamento** (`Bio.Align.PairwiseAligner`, BLOSUM62, extremidades livres), para estruturas
+  enviadas à mão ou modelos preditos.
 
-#### 3.2.1 POA2 - Input files
+Resíduos desordenados no cristal simplesmente não existem no arquivo, então um epítopo pode ser
+posicionado corretamente e ainda assim aparecer menor do que é. Esses são recortados para a parte
+observada e marcados como parciais, em vez de serem estendidos por aritmética.
 
-The results from POA1 must first undergo conservancy analysis using the [Epitope Conservancy Analysis - IEDB](http://tools.iedb.org/conservancy) tool. This analysis should be performed for all ```.fasta``` files (organized by organism species in POA1). The results, in ```.csv``` format, should be downloaded and stored in a single directory. POA2 processes these files, selects epitopes based on the user-defined conservancy threshold, and organizes them into a spreadsheet. The spreadsheet includes epitopes with higher or lower conservancy (see Section 3.2.2 POA2 - Mandatory Arguments) and their membrane topology classification.
+> **Cuidado com o `residue_number` do PDBe.** Ele devolve dois números para o mesmo resíduo: o
+> índice da entidade e o `author_residue_number`, que é o que o arquivo de coordenadas usa. Na
+> 6H3X eles são **1** e **482**. Tomar um pelo outro desloca todo epítopo em 481 resíduos.
 
-#### 3.2.2 POA2 - Mandatory Arguments
+O py3Dmol é necessário **apenas para a etapa 7**. O POA1, o POA2 e as etapas 1 a 6 não o importam.
 
-![Design sem nome](https://user-images.githubusercontent.com/72517648/151359269-a50cbc97-443b-4dc4-9082-b1b52527a566.png)
+**Saída visível em cada etapa:** toda etapa mostra o que produziu, não apenas que executou.
+A **etapa 1** lista o comprimento de cada sequência e os resíduos ambíguos (o `X` que o POA1
+recusa). A **etapa 2** mostra o conteúdo de cada arquivo de predição enviado — registros,
+espécies e proteínas lidas dos cabeçalhos, e um aviso quando o cabeçalho não segue
+`Proteína_Espécie_ID`; é o **conteúdo bruto do arquivo**, porque os epítopos em si são extraídos
+pelo POA1 (etapa 3) com os parâmetros de filtragem, e uma prévia que rodasse os parsers antes
+disso poderia discordar da execução real. A **etapa 4** exibe os CSVs de conservância em tabela,
+com epítopos e quantos têm match por espécie. A **etapa 5** traz um **funil dos filtros** —
+quantos epítopos restam após cada um (identidade mínima, máxima, `-m` e, se ligado, o filtro de
+limiar) — de modo que um resultado vazio aponta qual filtro o esvaziou, em vez de só sair vazio.
+O funil é calculado só a partir dos CSVs, então aparece **mesmo sem o pyTMHMM**: no Windows dá
+para ajustar os parâmetros e só então passar para a WSL para executar.
 
-* **parameter -d**: Directory containing the conservancy analysis results (.csv files).
-* **parameter -g or -l:**: Specifies the analysis objective: Use ```-g``` to identify conserved epitopes (>= threshold), or use ```-l``` to identify unique epitopes (< threshold).
-* **parameter -t**: Sequence identity threshold used for the conservancy analysis.
-* **parameter -f**: ```.fasta``` file containing all polyproteins/proteins used for epitope prediction (same file as submitted in POA1; see Section 3.1.2 POA1 - Mandatory Arguments for formatting details).
+**Testes:** `python -m pytest` — 155 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
+de serviço, backend da interface, visualização e o adaptador dos dados reais. Como preparar o
+ambiente e conferir tudo à mão (inclusive um conjunto de exemplo em `exemplos/limiar/` em que o
+limiar de identidade comprovadamente muda o resultado): **[`COMO_TESTAR.md`](COMO_TESTAR.md)**.
 
-#### 3.2.3 POA2 - Optional Arguments
+Revisão de código, correções e melhorias propostas: [`REVISAO.md`](REVISAO.md).
 
-![Design sem nome](https://user-images.githubusercontent.com/72517648/151359269-a50cbc97-443b-4dc4-9082-b1b52527a566.png)
+> **Corrigido:** o parser do NetCTL 1.2 tinha um bug **pré-existente** (inserção de linhas por índice
+> não sequencial, incompatível com pandas ≥ 2; e lógica de marcador/preenchimento inconsistente com a
+> seleção `<-E` dos epítopos, de modo que nenhum epítopo do NetCTL era selecionado). Foi corrigido
+> — com aprovação explícita do usuário, por alterar quais linhas são selecionadas — para usar índice
+> sequencial e preencher apenas as linhas curtas até a contagem de colunas, mantendo a seleção `<-E`
+> documentada neste README. Coberto por testes unitários.
 
-* **parameter -r**: Directory to store POA2 analysis results (```.xlsx``` and/or ```.fasta``` files).
-* **parameter -imin**: Minimum identity threshold for conservancy analysis (default = 60).
-* **parameter -imax**: Maximum identity threshold for conservancy analysis (default = 100).
-* **parameter -m**: Percentage of sequences with identity matches above the threshold (default = 60).
-* **parameter -rf**: Options for organizing ```.fasta``` files based on membrane topology: [0]: All epitopes from the conservancy analysis (no membrane topology classification); [1]: Epitopes located in exposed membrane portions; [2]: Epitopes located in transmembrane portions; [3]: Epitopes located in internal membrane portions. Default = 0
+> **Análise de várias espécies na mesma execução (corrigido):** a interface guardava um único
+> arquivo por método, então ao testar duas espécies ao mesmo tempo a segunda substituía a primeira
+> silenciosamente e o `-f` continuava sendo a referência da primeira; além disso o parser do
+> BepiPred-3.0 lia o cabeçalho como `Espécie_Proteína_ID` (invertido em relação à convenção
+> `Proteína_Espécie_ID` usada por todo o resto do pipeline), e a análise de conservância comparava
+> todas as espécies com o mesmo conjunto de proteínas. Agora: cada método aceita **um arquivo por
+> espécie** (unidos automaticamente antes do POA1), as referências são unidas em um único `-f`,
+> cada espécie é comparada com o conjunto de proteínas dela na etapa 4, e a etapa 3 exibe um
+> diagnóstico das espécies identificadas — incluindo as que aparecem nos epítopos mas faltam no
+> `-f`. Coberto por `tests/test_multispecies.py`.
 
-#### 3.2.4 Running POA2
+> **Cabeçalhos fora da convenção (corrigido):** se o JSON do BepiPred-2.0 traz várias espécies em
+> um só arquivo (chaves como `denv1`/`denv2`, sem proteína nem ID) ou se o `-f` usa
+> `Espécie_Proteína` (`denv1_ns1`), nenhuma espécie era extraída e todos os epítopos saíam sem
+> espécie. Agora o adaptador da etapa 2 mapeia **cada antígeno** para sua espécie e proteína, e a
+> etapa 1 mostra como cada cabeçalho foi interpretado, com opção de inverter os dois primeiros
+> campos.
 
-Once the conservancy analysis files are prepared, POA2 can be executed. Below is an example command for analyzing conserved epitopes (-g True):
+> **Saída da interface:** a GUI grava em `POA_Project/results/` (antes: um diretório temporário por
+> sessão), com **uma pasta por análise**, nomeada `DDMMAAAA-NOME_DO_TESTE`. Ao abrir, a interface
+> pergunta se você quer criar uma análise nova ou reabrir uma já gravada — a lista mostra a data e
+> até onde cada uma chegou. Assim repetir um teste não sobrescreve o anterior e dá para comparar os
+> dois. Use `POA_RESULTS_DIR` para apontar outra pasta-mãe. O cache de predições fica em
+> `results/cache`, **compartilhado** entre as análises: a chave é o hash do conteúdo, então uma
+> segunda análise sobre as mesmas sequências reaproveita os resultados em vez de reenviá-los.
+>
+> Uma pasta `results/` montada antes dessa convenção continua funcionando onde está: ela aparece na
+> lista como análise anterior e **nada é movido**.
 
-![dfd](https://user-images.githubusercontent.com/72517648/151359274-2b88b315-0f56-4494-84a8-7025be6e21df.png)
+> **POA2 no Windows:** `pip install pyTMHMM` não funciona (sem *wheel* para Windows, precisa do
+> Microsoft C++ Build Tools e o pacote não compila contra numpy 2.x). Rode a interface pela WSL,
+> apontando para a mesma pasta do projeto — veja `TESTING_WSL.md` §6.1. Abra **a mesma análise** do
+> lado da WSL e a etapa 5 oferece **"Retomar com estes arquivos"** a partir dos CSVs já gravados
+> nela, sem repetir as etapas 1 a 4.
 
-#### 3.2.5 POA2 - Output files
+### Logs da execução
 
-POA2 generates an Excel file ```.(.xlsx)```. containing all selected epitopes from the conservancy analysis. The spreadsheet includes:
+Toda linha que uma execução produz tem a mesma forma:
 
-* Conservancy data from the Epitope Conservancy Analysis (IEDB) tool.
+```
+<TAG> <etapa> | <mensagem>
+```
 
-* Membrane topology classification (external, transmembrane, or internal) as a percentage (values from 0 to 1), derived from the [pyTMHMM](https://github.com/bosborne/pyTMHMM) algorithm ([Sonnhammer et al., 1998](https://pubmed.ncbi.nlm.nih.gov/9783223/)).
+A **tag** diz que tipo de evento é, a **etapa** diz que parte do backend produziu a linha, e a
+mensagem carrega os fatos. Uma gramática só para todas significa que o log pode ser lido de cima
+a baixo sem saber qual módulo escreveu o quê:
 
-Additionally, the screened epitopes can be organized into ```.fasta``` files based on the options specified in the -rf parameter (see Section 3.2.3 POA2 - Optional Arguments).
+```
+12:12:49 INFO    poa.pipeline  STEP POA1 | start
+12:12:49 INFO    poa.pipeline  NOTE POA1 | methods=b2,x
+12:12:49 INFO    poa.pipeline  STEP POA1/bepipred-2.0 | start
+12:12:49 INFO    poa.pipeline  DONE POA1/bepipred-2.0 | epitopes=11 species=DENV1 elapsed=0.4s
+12:12:49 INFO    poa.pipeline  DONE POA1 | epitopes=19 species=DENV1,DENV2 methods=2 elapsed=1.2s
+12:12:49 WARNING poa.pipeline  WARN POA2/conservancy | no epitope passed the filters
+12:12:49 ERROR   poa.pipeline  FAIL POA2/topology | RuntimeError: pyTMHMM is not installed elapsed=0.0s
+```
 
-## 4. CITATIONS
+| Tag | Significa |
+|---|---|
+| `STEP` | Uma etapa começou |
+| `DONE` | A etapa terminou, com **o que ela produziu** — não só que rodou |
+| `FAIL` | A etapa não terminou, com o tipo e a mensagem da exceção |
+| `NOTE` | Um fato estabelecido dentro da etapa |
+| `WARN` | A execução segue, mas um resultado ficou suspeito |
+| `DATA` | Detalhe por item (arquivo, registro). Só em `DEBUG` |
 
-......................
+As etapas são caminhos — `POA1`, `POA1/bepipred-2.0`, `POA2/conservancy`, `POA2/topology`,
+`service/iedb-mhcii` — então dá para filtrar por parte do pipeline:
 
-*END*
+```bash
+grep 'FAIL'        poa.log    # tudo que não terminou
+grep 'POA2/'       poa.log    # a etapa POA2 inteira, sub-etapas incluídas
+grep 'DONE POA1/'  poa.log    # o que cada método do POA1 produziu
+```
 
---------------------------------------------------------------
+As tags são ASCII de propósito: um console do Windows em página de código legada levanta
+`UnicodeEncodeError` com caracteres fora do ASCII, e uma falha dentro do log é uma falha na
+execução.
 
-## Português
-Esta é a versão em português (PT-BR):
+O terminal é reservado para esse log. O `.streamlit/config.toml` versionado desliga o conversinha
+de inicialização do Streamlit (`logger.level = "warning"`), a coleta de estatísticas de uso — este
+pipeline lida com sequências de pesquisa não publicadas — e a tentativa de abrir o navegador
+(`headless = true`), que na WSL só produzia `gio: ... Operation not supported`. Abra
+`http://localhost:8501` você mesmo; se roda nativamente e prefere a abertura automática, mude
+`headless` para `false`.
+
+Antes, uma etapa que falhava **não deixava nenhuma linha** — na interface o traceback ia para a
+página do Streamlit e o terminal ficava em branco.
+
+Toda análise também grava **`poa.log` na própria pasta**, sempre em `DEBUG`, com o detalhe por
+item e o traceback completo, independente do nível do console. É o que permite explicar um
+resultado depois sem reexecutar, e faz o registro viajar junto dos resultados entre o Windows e o
+Linux. Duas variáveis de ambiente: `POA_LOG_LEVEL` (padrão `INFO`) e `POA_LOG_FILE` (para apontar
+o arquivo em execuções de linha de comando).
+
+> **Novo: ajuda contextual nos campos.** Cada campo não trivial da interface agora tem um **"?"**
+> ao lado do rótulo; passando o mouse, aparece o que é aquele campo, o que colocar nele e — quando
+> não é óbvio — o que dá errado se estiver errado. A atenção maior foi para os três números de
+> conservância que têm nomes parecidos e significados diferentes: o **limiar (`-t`)** é o critério
+> com que a conservância é *calculada*, o **`-m`** é o percentual mínimo de proteínas que precisam
+> ter dado match, e **`imin`/`imax`** são limites sobre a identidade do próprio epítopo. Confundir
+> os três é a forma mais comum de ler um resultado do POA2 como significando outra coisa. Os
+> textos ficam em `poa/gui/help_texts.py`, revisáveis como documentação, separados do layout.
+
+> **Novo: reabrir uma análise devolve os arquivos às suas etapas.** Antes, reabrir restaurava
+> apenas os CSVs de conservância e a referência, e atrás de um botão na etapa 5 — os arquivos de
+> predição enviados à mão na etapa 2, os conjuntos de comparação por espécie da etapa 4 e a
+> estrutura da etapa 7 ficavam no disco enquanto a interface mostrava campos vazios, então
+> continuar uma análise significava reenviar o que ela já continha. Agora tudo é carregado
+> automaticamente, cada arquivo na etapa de onde veio, e a barra lateral lista o que voltou.
+>
+> Isso funciona porque a **procedência é gravada na chegada**, num `input_history.json` dentro da
+> pasta da análise: o nome do arquivo não diz de que etapa ele veio — um FASTA de referência e um
+> de "outros preditores" são ambos FASTAs em `inputs/`, e um arquivo que você nomeou não segue
+> convenção nenhuma. Os caminhos são gravados **relativos à pasta da análise**, porque a mesma
+> pasta é aberta do Windows e da WSL, onde o caminho absoluto é outro.
+>
+> Análises criadas antes desse registro continuam sendo recarregadas, classificando os arquivos
+> pelo nome — a interface avisa quando foi esse o caminho, porque é melhor esforço e vale conferir.
+
+> **Novo: botão "Nova análise" na barra lateral.** Limpa todos os campos e resultados da sessão e
+> cria uma **pasta nova**, voltando à tela de nomear a análise. É o único caminho que zera os
+> formulários: "Trocar de análise" mantém os parâmetros de filtragem de propósito, porque o motivo
+> usual de abrir outra análise é rodar os mesmos parâmetros sobre outros dados. A análise anterior
+> continua gravada em `results/` — nada em disco é apagado, e é justamente a pasta nova que evita
+> que os arquivos de um teste se misturem ao seguinte.
+
+> **Corrigido (perda de dados ao navegar entre etapas):** o Streamlit só renderiza a etapa
+> selecionada, e um campo que não é renderizado perde o valor. Como os filtros do POA2 não eram
+> guardados em lugar nenhum, ir à etapa 4 conferir um CSV e voltar à etapa 5 devolvia tudo a
+> 60/100/60 — sem aviso, apenas o formulário mostrando os padrões de novo. O mesmo valia para os
+> alelos e o comprimento do peptídeo do MHC-II, o modo da etapa 4 e os controles do visualizador
+> 3D. Agora existe uma **política de estado** declarada no topo de `poa/gui/app.py`: todo campo é
+> espelhado numa chave de sessão comum, que o widget lê como padrão e reescreve a cada execução.
+> O mesmo valia para o PDB da etapa 7, que era lido direto do uploader sem ser gravado — agora ele
+> vai para `inputs/` como os demais arquivos e a estrutura continua na tela ao voltar à etapa.
+> Caminhos e resultados continuam sendo descartados ao trocar de análise; os parâmetros de
+> filtragem sobrevivem à troca, porque o motivo usual de abrir outra análise é rodar os mesmos
+> parâmetros sobre outros dados.
+
+> **Corrigido (limiar da etapa 5 preso em 70):** quando os CSVs não declaram com que limiar foram
+> gerados — sem `conservancy_meta.json` e sem o valor no cabeçalho — a etapa 5 caía em
+> `ss.threshold`, que só é o valor da etapa 4 se a etapa 4 rodou **na mesma sessão**. Ao retomar
+> uma análise do disco (o caminho Windows → WSL), a sessão nunca passou pela etapa 4 e o valor era
+> o default inicial de 70: o POA2 aplicava 70 a dados calculados com outro limiar. Agora a etapa 5
+> **pede** o limiar e o critério nesse caso, e aplica o que você informar; e retomar uma análise
+> adota o limiar gravado junto dos CSVs em vez de deixar a sessão em 70. Quando os CSVs declaram o
+> limiar, o comportamento é o mesmo de antes — o dado continua vencendo o formulário.
+
+> **Corrigido (outros preditores sem ID do NCBI):** o parser do `-x` exigia seis campos no
+> cabeçalho e levantava erro em qualquer arquivo cujos epítopos não trouxessem um número de
+> acesso — embora a seção 3.1.1.5 documente o ID como opcional (`se_houver`). Um cabeçalho de
+> cinco campos (`Proteína_Espécie_Método_Início_Fim`) agora é aceito, com `ID_Sequence` vazio, e
+> a mensagem de erro descreve as duas formas válidas.
+
+> **Corrigido (tabela do POA2 na etapa 5):** a seção "Saída do POA2" exibia o resultado da última
+> execução bem-sucedida sempre que existia um. Se você mudava um parâmetro e a execução falhava —
+> ou se simplesmente não reexecutava — a tabela antiga ficava logo abaixo de um funil já
+> recalculado com os valores novos, sem nada indicando qual era qual. Agora a execução descarta o
+> resultado anterior antes de começar, e uma tabela que não corresponde aos parâmetros na tela vem
+> marcada como de execução anterior.
+
+> **Corrigido (topologia do POA2):** `tmhmmAnalysis` preenchia as colunas `Portion_*` com um valor
+> por *registro casado* do `-f`, não por epítopo. Um `-f` com registros redundantes fazia cada
+> epítopo casar duas vezes (o teste de espécie era um *substring*: `DENV1` casa com `DENV1_NS1` e
+> com `E_DENV1_REF`) e a atribuição falhava; pior, com casamentos a mais e a menos no mesmo lote os
+> totais podiam bater e as colunas eram gravadas deslocadas, atribuindo a topologia de um epítopo a
+> outro. Agora a comparação usa o campo de espécie do cabeçalho e há exatamente um valor por linha.
 
 ## 1. INTRODUÇÃO
 
@@ -282,6 +381,67 @@ Os arquivos resultantes da primeira fase do POA (POA1) deverão ser submetidos n
 
 
 O POA2 analisará os epítopos de maior ou menor conservação (a depender do objetivo da análise) e aplicará sobre estes epítopos a análise de predição de estruturas transmembranares, TMHMM. Por fim retornará os epítopos resultantes da análise de conservação e sua caracterização quanto à posição na membrana (externa, transmembranar e interna).
+
+
+### 3.0 POA0 — da espécie ao FASTA
+
+Antes do POA1 havia um passo que ninguém automatizava: achar a proteína. O POA0 faz essa busca em
+quatro bancos públicos e grava os arquivos que o resto do pipeline consome, para **qualquer**
+organismo — basta o nome.
+
+> **Na interface gráfica**, o POA0 está dentro da **etapa 1**, no expansor
+> *"🔎 Não tenho o FASTA — buscar pela espécie"*. São as mesmas quatro perguntas, em menus, e o
+> arquivo gerado é adotado como se você o tivesse enviado: a tabela de cabeçalhos, a checagem de
+> resíduos ambíguos e a união no `-f` tratam os dois casos igual. A interface e a linha de comando
+> chamam a mesma função (`poa.core.dbsearch.run_poa0`), então não podem divergir.
+
+```bash
+python POA0_v1.0.py -s "Oropouche virus" -d entradas
+```
+
+Sem mais nada, ele resolve o táxon, escolhe a proteína mais bem ranqueada e grava o FASTA. Mas a
+escolha raramente deve ser automática, então quatro modos de listagem mostram as opções e encerram:
+
+```bash
+python POA0_v1.0.py -s "Oropouche virus"                 # qual táxon?
+python POA0_v1.0.py -s "Oropouche virus" -l proteinas    # qual proteína?
+python POA0_v1.0.py -a A0A0D4BSW3 -l regioes             # qual região?
+python POA0_v1.0.py -a A0A0D4BSW3 -l estruturas          # qual estrutura?
+```
+
+e então a execução que grava:
+
+```bash
+python POA0_v1.0.py -a A0A0D4BSW3 -r 482-703 --nome GcHead \
+                    --sigla OROV --estrutura 6H3X -d entradas
+```
+
+| Fonte | O que fornece |
+|---|---|
+| **UniProt** | táxon, entradas, sequências e as anotações `Chain` (proteínas maduras) e `Domain` |
+| **InterPro** | domínios Pfam com coordenadas — o UniProt referencia o Pfam mas não traz os limites |
+| **PDBe SIFTS** | a correspondência resíduo a resíduo entre a sequência e uma estrutura |
+| **RCSB** | o arquivo da estrutura |
+
+A região pode ser dada por nome (`-r "Envelope protein E"`), por id PDB ou por intervalo
+(`-r 482-703`). Sem `-r`, usa a sequência inteira.
+
+**Saídas em `-d`:** `<Nome>_<Sigla>.fasta` (um registro, serve ao mesmo tempo de entrada dos
+preditores e de `-f` do POA1/POA2), `structure_<PDB>.pdb` quando se pede `--estrutura`, e
+`POA0_relatorio.json` com a procedência — táxon, acessão, região, o cabeçalho do arquivo de
+estrutura e o deslocamento SIFTS.
+
+**Um arquivo só para a predição e para o `-f`.** As predições reportam posições relativas à
+sequência em que rodaram; entregar ao POA1/POA2 uma sequência diferente (a poliproteína inteira,
+por exemplo) desloca todo epítopo. Usar o mesmo arquivo nos dois lugares torna esse erro impossível.
+
+**Cabeçalho `Proteína_Sigla_Acessão`**, que é o que o `poa.core.topology.sameVirus` lê: campo 0 é a
+proteína, campo 1 é a espécie. Tudo é separado por `_`, então nenhum dos dois campos pode conter um
+underscore — o POA0 remove pontuação e espaços e avisa quando mudou o nome (`Envelope protein E`
+vira `EnvelopeproteinE`; use `--nome` para escolher outro).
+
+**Escopo taxonômico:** `organism_id` casa só com o táxon exato; `--descendentes` usa `taxonomy_id`,
+que inclui cepas e isolados. Para vírus a diferença costuma ser de uma ordem de grandeza.
 
 
 ### 3.1 POA1
@@ -495,6 +655,15 @@ Para utilizar o POA2 será necessário organizar todos os resultados da análise
 
 O usuário deverá informar ao POA2 qual foi o objetivo da análise, se esta foi feita visando encontrar epítopos conservados (>=) ou epítopos únicos (<), __parâmetro -g ou -l__, respectivamente, e qual o threshold de identidade de sequência (Sequence identity threshold) foi utilizado para fazer a predição (__parâmetro -t__).
 
+> **Esses dois valores agora são conferidos, não apenas anotados.** O POA2 lê o limiar e o critério
+> com que os CSVs foram de fato produzidos — do cabeçalho da coluna de *percent of matches*, como o
+> IEDB o escreve, ou do `conservancy_meta.json` que a etapa 4 da interface grava junto dos arquivos —
+> e **recusa a execução** quando eles não batem com `-t`/`-g|-l`. Antes, esses parâmetros apenas
+> renomeavam uma coluna: era possível filtrar dados calculados a `<= 100%` e rotular o resultado como
+> "conservados a `>= 70%`" sem nenhum aviso, e `-g` e `-l` devolviam exatamente as mesmas linhas.
+> Quando não há como descobrir o limiar de origem (CSV sem metadados e sem o valor no cabeçalho), o
+> POA2 emite um aviso e segue; `-strict` transforma esse aviso em erro.
+
 Por último, deverá apresentar um arquivo fasta que contenha todas as polyproteínas/proteínas usadas para a predição de epítopos (__parâmetro -f__). Este arquivo poderá ser igual àquele submetido no POA1, seguindo a mesma formatação (ver seção 3.1.2).
 
 
@@ -511,6 +680,10 @@ Por último, deverá apresentar um arquivo fasta que contenha todas as polyprote
  __parâmetro -imax:__ Threshold máximo de identidade aceito no resultado da análise de conservação entre os peptídeos e as proteínas avaliadas (default = 100).
  
  __parâmetro -m:__ porcentagem das sequências que tiveram match de identidade acima do threshold de identidade de sequência avaliado (parâmtero -t) (default = 60).
+
+ __parâmetro -idf:__ aplica o threshold `-t` também como critério de seleção, e não só como base da coluna de *percent of matches* (desligado por padrão, preservando o comportamento original). Com `-g`, mantém os epítopos cuja identidade **mínima** alcança o limiar (conservados em todo o conjunto); com `-l`, os cuja identidade **máxima** fica abaixo dele (únicos).
+
+ __parâmetro -strict:__ aborta quando o cabeçalho dos CSVs declara um threshold diferente de `-t`/`-g|-l`, em vez de apenas avisar (default: avisar).
  
  __parâmetro -rf:__ Opções de arquivo fasta contendo os resultados da análise de conservação (default = None). 
  [0] Todos os epitopos resultantes da análise de conservação, sem considerar a classificação por topologia de membrana.
@@ -537,3 +710,296 @@ Os epitopos triados podem também ser organizados em arquivos fasta, como demons
 ## CITAÇÕES
 
 .....
+
+--------------------------------------------------------------
+
+## English
+
+This is the English version of the README. The Portuguese (PT-BR) version is at the top of this
+document.
+
+## 0. AUTOMATION & GRAPHICAL INTERFACE (v1.1)
+
+> This release adds an optional automation layer and a graphical interface **without changing the
+> scientific ranking/selection logic**. The original command line still works exactly as before.
+> The full design and per-tool automation strategy are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> A complete report of everything that changed (PT-BR) is in [`MUDANCAS.md`](MUDANCAS.md) —
+> also available as [`MUDANCAS.pdf`](MUDANCAS.pdf).
+
+**Package layout** (refactored into layers; the flat scripts became thin shims):
+`poa/core` (parsing + pipeline logic, no network) · `poa/services` (external tools) ·
+`poa/cli` (POA1/POA2, same arguments) · `poa/gui` (Streamlit app).
+
+**Install**
+```
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+```
+Extras that are not pip packages / are heavy (install only if you want that automation):
+* **EMBOSS `antigenic`** (replaces the offline PAP/IMED site, same Kolaskar–Tongaonkar method):
+  `conda install -c bioconda emboss` (on Windows: WSL2 + conda, or Docker).
+* **BepiPred-3.0** local model (PyTorch + ESM-2): `pip install bp3`.
+* **Browser automation** for NetCTL 1.2 / BepiPred-2.0: `pip install playwright && playwright install chromium`.
+
+**Run the GUI** (guided 6-step flow: proteins → predictions → POA1 → conservancy → POA2 → results):
+```
+streamlit run poa/gui/app.py      # or:  python run_gui.py
+```
+
+**Run the CLI** (unchanged):
+```
+python POA1_v1.0.py -f proteins.fasta -d results -b3 bepipred3.fasta -e y
+python POA2_v1.0.py -g True -t 70 -d conservancy_csvs -f proteins.fasta -rf 1
+```
+
+**Automation status per tool** (verified 2026 — details in `ARCHITECTURE.md`):
+
+| Tool | Strategy | Fallback |
+|---|---|---|
+| MHC-II Binding (IEDB) | REST API (synchronous) | manual upload |
+| BepiPred-3.0 | local `bp3` package | manual upload |
+| PAP/IMED | local EMBOSS `antigenic` | manual upload |
+| Epitope Conservancy (IEDB) | **local reimplementation** (no API/standalone exists) | manual CSV upload |
+| NetCTL 1.2 / BepiPred-2.0 | best-effort browser automation | manual upload |
+| pyTMHMM | local (unchanged) | — |
+
+In every case, if a service is unavailable the pipeline logs a clear message and lets you upload
+the result file manually (preserving the original semi-automatic behavior).
+
+**Tests:** `pytest` (parsers, ranking/filtering, local conservancy, service clients, GUI backend).
+
+> **Fixed:** the NetCTL 1.2 HTML parser had a pre-existing bug (row append via a non-sequential
+> index, incompatible with pandas ≥ 2; and marker/append logic inconsistent with the `<-E`
+> epitope selection). It was corrected (user-approved) to use a sequential index and to pad only
+> short rows to the column count, keeping the `<-E` selection documented in the README; covered
+> by unit tests.
+
+## 1. INTRODUCTION
+
+High-throughput screening, genomic sequence analysis of pathogenic organisms, and reverse vaccinology techniques have revolutionized the rapid development of vaccines and diagnostic tests. In this context, in silico approaches, such as multi-epitope construction, have become indispensable for designing biotechnological products and immunotherapeutic interventions against viral, bacterial, and parasitic diseases ([Dar et al., 2021](https://www.nature.com/articles/s41598-021-90868-2); [Enayatkhani et al., 2021](https://www.tandfonline.com/doi/full/10.1080/07391102.2020.1756411?casa_token=Ctu83G9J4aEAAAAA%3Aocl_27U5qwcFn-WXSFZIaaSmChfq-hC5ggb281Z1hGuocFuOXH65acPngTeO6HavrexguLxkdEbfAVQ); [Shey et al., 2019](https://www.nature.com/articles/s41598-019-40833-x)).
+
+The Antigen Optimization Pipeline (POA, in Portuguese version) is a semi-automated Python-based pipeline designed to analyze, organize, retrieve, and screen epitopes derived from antigenic peptide predictions using various web-based tools. POA integrates results from B cell, cytotoxic T cell (Tc), and T helper (Th) cell epitope prediction tools to identify optimal antigenic targets and construct a comprehensive antigen database. Additionally, POA enables the identification of conserved epitopes across species using the [Epitope Conservancy Analysis - IEDB](http://tools.iedb.org/conservancy) tool and characterizes epitope localization in transmembrane regions through the [pyTMHMM](https://github.com/bosborne/pyTMHMM) tool. By integrating these approaches, POA identifies high-potential candidates within viral proteins, driving advancements in integrative therapeutic interventions. This capability provides innovative strategies to tackle the global burden of zoonotic and vector-borne diseases, paving the way for the development of targeted vaccines and immunotherapies.
+
+### 1.1 Antigenic peptide prediction
+
+POA optimizes the organization and visualization of in silico epitope prediction results, enabling more efficient analysis of large datasets. It also optimizes the screening process by identifying unique or shared epitopes within a group of organisms and characterizing epitopes exposed on membrane structures (Batista et al., 2025).
+
+Supported Prediction Tools:
+
+* B cell epitopes: [Bepipred 2.0](https://services.healthtech.dtu.dk/service.php?BepiPred-2.0) and [Predicted Antigenic Peptides (PAP) - IMED](http://imed.med.ucm.es/Tools/antigenic.pl).
+
+* Tc epitopes: [NetCTL - 1.2](https://services.healthtech.dtu.dk/service.php?NetCTL-1.2).
+
+* Th epitopes: [MHC-II Binding Predictions](http://tools.iedb.org/mhcii/).
+
+POA is also capable of analyzing results from additional prediction tools, provided the data is formatted into standardized FASTA files (see Section 3.1.1 POA1 - Input files).
+
+## 2. INSTALLATION
+
+POA v1.0 must be installed manually. Ensure all dependencies are installed for proper functionality. The required dependencies are:
+
+* Python version > 3.6.0
+* Pandas version >= 1.4.0
+* Numpy version >= 1.21.4
+* Argparse version 1.4.0
+* Datetime version 4.4
+* Biopython version 1.79
+* Html version 1.16
+* Json
+* pyTMHMM (This package needs manual installation. Please follow the instructions in [pyTMHMM tool](https://github.com/bosborne/pyTMHMM)) 
+
+To install POA v1.0 on Linux, use the following command:
+
+```
+git clone https://github.com/UbiratanBatista/POA_Project.git
+```
+
+## 3. USING THE POA PIPELINE
+
+POA is a semi-automated pipeline, requiring some manual steps by the user. The pipeline consists of two main stages: POA1 and POA2.
+
+The first stage of the pipeline, POA1, analyzes prediction results from epitope prediction tools (see Section 1.1 - Antigenic Peptide Prediction), creates an antigen database based on epitope ranking values, and organizes the results into multiple FASTA files for use in the next stage.
+
+Following this, the output files from POA1 should be submitted to the [Epitope Conservancy Analysis - IEDB](http://tools.iedb.org/conservancy) web platform. The conservancy analysis results are then processed by POA2, the second stage of the pipeline. POA2 evaluates epitopes with higher or lower conservancy (depending on the analysis objective) and performs transmembrane structure prediction using TMHMM. Ultimately, POA2 returns the conservancy analysis results along with the characterization of epitope localization in the membrane (external, transmembrane, or internal).
+
+### 3.1 POA1
+
+POA1 analyses prediction results from web tools, which may be in various formats, ranks epitopes based on tool-specific criteria, and generates a curated antigen database. The results are stored in standardized matrices and subsequently organized into multiple FASTA files for downstream analysis.
+
+#### 3.1.1 POA1 - Input files
+
+The first step is to perform predictions in the epitope prediction web tools (see section 1.1), following the protocols and parameters defined for each method and objective. POA1 accepts output files from various epitope prediction tools. Below are the specific requirements for each tool:
+
+##### 3.1.1.1 Bepipred 2.0
+
+Submit a ```.fasta``` file containing all proteins for analysis.
+
+Download the results as a ```.json``` file (JSON Summary).
+
+Example output:
+![Captura de tela de 2022-01-26 17-45-11](https://user-images.githubusercontent.com/72517648/151360191-20879962-26e7-4df5-a79e-1f9d79082c8d.png)
+
+*The result of the Bepipred 2.0 analysis is a web page (html) containing the proteins and the predicted antigenic regions (marked with E) in each sequence.
+
+##### 3.1.1.2 Predicting Antigenic Peptides (PAP) - IMED
+
+For the PAP tool, ensure each protein sequence is submitted separately, with the header formatted as " ```><protein>_<organism>...``` ". The prediction result will appear as follows:
+![Captura de tela de 2022-01-26 17-56-13](https://user-images.githubusercontent.com/72517648/151360188-21f130dd-ae97-4067-b7c9-8f138bff95bf.png)
+
+Copy the prediction table and paste it into a ```.txt``` file, adhering to the following format:
+![Captura de tela de 2022-01-26 17-58-37](https://user-images.githubusercontent.com/72517648/151360185-4a3b4863-5eab-4024-99d9-5105ac705e53.png)
+
+##### 3.1.1.3 NetCTL 1.2
+
+Submit a protein ```.fasta`` file for the NetCTL 1.2 analysis. The prediction result will appear as follows:
+![Captura de tela de 2022-01-26 18-02-17](https://user-images.githubusercontent.com/72517648/151360184-6091362a-bcb6-455f-b363-64e575096806.png)
+
+*The NetCTL 1.2 output is a web page (html) containing many peptides and those predicted to be antigenic (indicated with < - E). Save the results as an ```.html``` file (ATTENTION: ensure the page is fully loaded before saving).
+
+##### 3.1.1.4 MHC-II Binding Predictions
+
+Submit proteins individually to the MHCIIBP tool. The output will resemble the following:
+![Captura de tela de 2022-01-26 18-07-50](https://user-images.githubusercontent.com/72517648/151360180-72b31616-f40f-4bce-a78c-25124cffc675.png)
+
+The MHCIIBP result is an web page (select “Text file” under “Output format”) containing the predicted peptides, their scores as defined by the prediction algorithms, and additional relevant information. Save the results as ```.html``` files, ensuring the page is fully loaded before saving. Name the files as ```<protein>_<organism>.html``` or, for complete polyproteins, ```polyp_<organism>.html```. Organize all ```.html``` files into a **single folder (or directory)** for further processing.
+
+##### 3.1.1.5 Other Predictors
+
+Results from additional prediction tools can also be analyzed by POA, provided they are formatted into a standardized ```FASTA``` file. The file should be organized as follows:
+```
+><protein>_<organism>_<predictor_method>_<NCBI_ID_if_any>_<start_position>_<end_position>
+Epitope 1
+
+><protein>_<organism>_<predictor_method>_<NCBI_ID_if_any>_<start_position>_<end_position>
+Epitope 2
+```
+
+#### 3.1.2 POA1 - Mandatory Arguments
+
+![3d](https://user-images.githubusercontent.com/72517648/151359262-9553ca42-63ad-4c9e-976f-0ac6704f49df.png)
+
+* **parameter -b2**: ```.json``` file containing the Bepipred 2.0 prediction results (see Section 3.1.1.1 Bepipred 2.0).
+* **parameter -b3**: ```.fasta``` file containing the Bepipred 3.0 prediction results.
+* **parameter -p**: ```.fasta``` file containing the PAP-IMED prediction results (see Section 3.1.1.2 Predicting Antigenic Peptides (PAP) - IMED).
+* **parameter -n**: ```.html``` file containing the NetCTL 1.2 analysis results (see Section 3.1.1.3 NetCTL 1.2).
+* **parameter -m**: Directory containing all ```.html``` files from the MHC-II Binding Predictions analysis (see Section 3.1.1.4 MHC-II Binding Predictions).
+* **parameter -x**: ```.fasta``` file containing results from any other predictor, formatted as specified (see Section 3.1.1.5 Other Predictors).
+
+**Note:** At least one epitope prediction result must be submitted (see Section 3.1.1 POA1 - Input files).
+
+In addition to the prediction results (parameters ```-b```, ```-p```, ```-m```,```-n```, and ```-x```), a ```.fasta``` file containing all proteins (or polyproteins) used for epitope prediction must be submitted (**parameter -f**). The file should follow the format below:
+
+For complete polyproteins:
+```
+>polyp_<organism_name1>_<NCBI_identifier1_if_any>...
+
+Amino_acid_sequence 1
+
+>polyp_<organism_name2>_<NCBI_identifier2_if_any>...
+
+Amino_acid_sequence 2
+```
+
+For individual proteins:
+```
+><protein_name1>_<organism_name1>_<NCBI_identifier1_if_any>...
+
+Amino_acid_sequence 1
+
+><protein_name2>_<organism_name2>_<NCBI_identifier2_if_any>...
+
+Amino_acid_sequence 2
+```
+The header information is parsed using the separator symbol ("_") for analysis.
+
+Additionally, a folder MUST be designated to store the analysis results (**parameter -d**).
+
+#### 3.1.3 POA1 - Optional Arguments
+
+![3d](https://user-images.githubusercontent.com/72517648/151359262-9553ca42-63ad-4c9e-976f-0ac6704f49df.png)
+
+* **parameter -bmin**: Minimum size for epitopes predicted by Bepipred (default = 0, no minimum size).
+* **parameter -bmax**: Maximum size for epitopes predicted by Bepipred (default = 0, no maximum size).
+* **parameter -pmin**: Minimum size for epitopes predicted by PAP - IMED (default = 0, no minimum size).
+* **parameter -pmax**: Maximum size for epitopes predicted by PAP - IMED (default = 0, no maximum size).
+* **parameter -mhla**: Type of HLA allele investigated in the MHC-II ligand analysis (options: HLA-DP, HLA-DQ, HLA-DR; default = DR).
+* **parameter -mic**: IC-50 threshold for the NN_align 2.3 algorithm used for epitope selection: IC50 < 50 nM (High-affinity binding to MHCII), IC50 < 500 nM (Intermediate affinity binding to MHCII), and IC50 < 5000 nM (Low-affinity binding to MHCII); Default = 50.
+* **parameter -xmin**: Minimum size for epitopes predicted by other predictors (default = 0, no minimum size).
+* **parameter -xmax**: Maximum size for epitopes predicted by other predictors (default = 0, no maximum size).
+* **parameter -e**: Option to export results as an Excel spreadsheet ```(.xlsx)``` in addition to the default ```.fasta``` files (default = n).
+
+#### 3.1.4 Running POA1
+
+Once the prediction result files are prepared, POA1 can be executed.
+
+![2](https://user-images.githubusercontent.com/72517648/151359259-0473b328-cb54-423b-ac3c-f49cefc94213.png)
+
+#### 3.1.5 POA1 - Output files
+
+POA1 organizes the epitopes into ```.fasta``` files for submission to the Epitope Conservancy Analysis web tool. The epitopes are grouped by organism species, with all epitopes from a species stored in a single ```.fasta``` file named:
+
+```<SpeciesID_epitope>.fasta```
+
+For the conservancy analysis, these epitopes should be compared to protein sequences from other species. To avoid redundancy, it is recommended to create a ```.fasta``` file containing all proteins except those from the organism from which the epitopes were extracted. Using complete polyproteins for comparison is also suggested.
+
+POA1 also generates an analysis report containing statistics on the analyzed epitopes, including: the total number of proteins, the total number of epitopes, and the proteins with the highest and lowest number of epitopes. Additionally, the pipeline provides the option to export the epitopes in ```.xlsx``` format (see Section 3.1.3 POA1 - Optional Arguments).
+
+### 3.2 POA2
+
+After the [Epitope Conservancy Analysis - IEDB](http://tools.iedb.org/conservancy) tool processes the files generated by POA1, POA2 analyzes the conservancy data for each peptide. POA2 selects peptides based on user-defined conservancy thresholds and uses the [pyTMHMM](https://github.com/bosborne/pyTMHMM) tool to classify their membrane topology based on transmembrane helix predictions. The results are stored in ```.xlsx``` (spreadsheet) and ```.fasta``` files for further use.
+
+#### 3.2.1 POA2 - Input files
+
+The results from POA1 must first undergo conservancy analysis using the [Epitope Conservancy Analysis - IEDB](http://tools.iedb.org/conservancy) tool. This analysis should be performed for all ```.fasta``` files (organized by organism species in POA1). The results, in ```.csv``` format, should be downloaded and stored in a single directory. POA2 processes these files, selects epitopes based on the user-defined conservancy threshold, and organizes them into a spreadsheet. The spreadsheet includes epitopes with higher or lower conservancy (see Section 3.2.2 POA2 - Mandatory Arguments) and their membrane topology classification.
+
+#### 3.2.2 POA2 - Mandatory Arguments
+
+![Design sem nome](https://user-images.githubusercontent.com/72517648/151359269-a50cbc97-443b-4dc4-9082-b1b52527a566.png)
+
+* **parameter -d**: Directory containing the conservancy analysis results (.csv files).
+* **parameter -g or -l:**: Specifies the analysis objective: Use ```-g``` to identify conserved epitopes (>= threshold), or use ```-l``` to identify unique epitopes (< threshold).
+* **parameter -t**: Sequence identity threshold used for the conservancy analysis.
+
+> **Both values are now verified, not merely recorded.** POA2 reads back the threshold and operator
+> the CSVs were actually produced with — from the *percent of matches* column header, the way IEDB
+> spells it, or from the `conservancy_meta.json` written next to them by step 4 of the GUI — and
+> **refuses to run** when they disagree with `-t`/`-g|-l`. They previously only renamed a column, so
+> a run could filter data computed at `<= 100%` and label it "conserved at `>= 70%`", and `-g` and
+> `-l` returned exactly the same rows. When the source threshold cannot be determined, POA2 warns
+> and proceeds; `-strict` turns that warning into an error.
+* **parameter -f**: ```.fasta``` file containing all polyproteins/proteins used for epitope prediction (same file as submitted in POA1; see Section 3.1.2 POA1 - Mandatory Arguments for formatting details).
+
+#### 3.2.3 POA2 - Optional Arguments
+
+![Design sem nome](https://user-images.githubusercontent.com/72517648/151359269-a50cbc97-443b-4dc4-9082-b1b52527a566.png)
+
+* **parameter -r**: Directory to store POA2 analysis results (```.xlsx``` and/or ```.fasta``` files).
+* **parameter -imin**: Minimum identity threshold for conservancy analysis (default = 60).
+* **parameter -imax**: Maximum identity threshold for conservancy analysis (default = 100).
+* **parameter -m**: Percentage of sequences with identity matches above the threshold (default = 60).
+* **parameter -idf**: Also apply `-t` as a selection criterion, not just as the basis of the *percent of matches* column (off by default, preserving the original behaviour). With `-g` it keeps epitopes whose **minimum** identity reaches the threshold (conserved across the whole set); with `-l`, those whose **maximum** identity stays below it (unique).
+* **parameter -strict**: Abort when the CSV headers declare a threshold other than `-t`/`-g|-l`, instead of warning (default: warn).
+* **parameter -rf**: Options for organizing ```.fasta``` files based on membrane topology: [0]: All epitopes from the conservancy analysis (no membrane topology classification); [1]: Epitopes located in exposed membrane portions; [2]: Epitopes located in transmembrane portions; [3]: Epitopes located in internal membrane portions. Default = 0
+
+#### 3.2.4 Running POA2
+
+Once the conservancy analysis files are prepared, POA2 can be executed. Below is an example command for analyzing conserved epitopes (-g True):
+
+![dfd](https://user-images.githubusercontent.com/72517648/151359274-2b88b315-0f56-4494-84a8-7025be6e21df.png)
+
+#### 3.2.5 POA2 - Output files
+
+POA2 generates an Excel file ```.(.xlsx)```. containing all selected epitopes from the conservancy analysis. The spreadsheet includes:
+
+* Conservancy data from the Epitope Conservancy Analysis (IEDB) tool.
+
+* Membrane topology classification (external, transmembrane, or internal) as a percentage (values from 0 to 1), derived from the [pyTMHMM](https://github.com/bosborne/pyTMHMM) algorithm ([Sonnhammer et al., 1998](https://pubmed.ncbi.nlm.nih.gov/9783223/)).
+
+Additionally, the screened epitopes can be organized into ```.fasta``` files based on the options specified in the -rf parameter (see Section 3.2.3 POA2 - Optional Arguments).
+
+## 4. CITATIONS
+
+......................
+
+*END*

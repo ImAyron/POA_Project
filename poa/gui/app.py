@@ -1,0 +1,1834 @@
+"""Streamlit GUI for the POA pipeline — guided 6-step flow.
+
+Run with:  streamlit run poa/gui/app.py   (or:  python run_gui.py)
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+# When launched via `streamlit run poa/gui/app.py`, Streamlit puts this file's directory on
+# sys.path (not the project root), so `import poa` would fail. Add the repo root explicitly.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+import streamlit.components.v1 as components
+
+
+def _embed_html(html: str, height: int) -> None:
+    """
+    Show self-rendering HTML (the 3D viewer) without the deprecation notice.
+
+    Streamlit renamed this to ``st.iframe`` and now warns on *every* rerun of a page that still
+    calls ``components.html``, which drowned the pipeline's own log. Resolved by attribute rather
+    than by version: the attribute is the fact, and the fallback keeps the viewer working on the
+    Streamlit floor declared in ``requirements.txt`` instead of forcing it up for one call.
+    """
+    render = getattr(st, "iframe", None) or components.html
+    render(html, height=height)
+from Bio import SeqIO
+
+from poa.core import structure_map
+from poa.core.artifacts import safe_child, staged_outputs
+from poa.core.parsers import conservancy as conservancy_parser
+from poa.gui import backend, viz
+from poa.gui.help_texts import HELP
+from poa.logging_conf import use_log_file, setup_logging
+from poa.core import dbsearch
+from poa.services import (
+    antigenic_client,
+    bepipred_client,
+    conservancy_client,
+    database_client,
+    mhcii_client,
+    tmhmm_client,
+)
+from poa.services.base import ServiceError, ServiceUnavailable
+
+setup_logging()
+st.set_page_config(page_title="POA — Pipeline de Otimização de Antígenos", page_icon="🧬", layout="wide")
+
+
+# --------------------------------------------------------------------------- session state
+# STATE POLICY — why every input below is mirrored into session state
+#
+# Streamlit reruns this script on every interaction and renders only the step selected in the
+# sidebar. A widget that is not rendered in a rerun loses its state, so a value typed on one step
+# is gone by the time the user navigates away and back: the widget is recreated from its own
+# default. That silently reverted the POA2 filters to 60/100/60 whenever the user left step 5 to
+# check something on step 4 — and step 5's parameters are the scientific ones.
+#
+# The rule, applied to EVERY input in this module:
+#
+#   1. The value of record lives in session state under a plain, non-widget key (``ss.threshold``,
+#      ``ss.params_poa1``, ``ss.params_poa2``, …). Plain keys are never cleaned up by Streamlit.
+#   2. The widget reads that key as its default and the result is written straight back, so the
+#      key is always what the form currently shows.
+#   3. When a widget needs its own ``key=``, it gets a *different* name than the key of record
+#      (``key="ref_swap_cb"`` next to ``ss.ref_swap``). Assigning to a widget's own key raises in
+#      Streamlit, and widget keys are the ones that get discarded.
+#   4. Grouped parameters are kept as one dict per step, so a step's form is one unit of state.
+#
+# Scope of a reset, from narrowest to widest:
+#
+#   * switching analyses (``_adopt_run``) drops ``_ANALYSIS_KEYS`` — paths and results, which point
+#     into the previous folder. Filter parameters deliberately survive, because the usual reason to
+#     open a second analysis is to run the same parameters over other data.
+#   * "Nova análise" (``_full_reset``) drops *everything*, widget keys included, and unbinds the
+#     folder so a new one is created. That is the only path that clears the forms.
+
+#: session keys holding data that belongs to one analysis — cleared when switching analyses,
+#: so a new run never inherits the previous one's file paths or results
+_ANALYSIS_KEYS = ("proteins_path", "ref_raw", "ref_uploads", "poa1_sources", "prepared_b2",
+                  "poa1_result", "conservancy_ready", "comparison_sets", "poa2_result",
+                  "poa2_ran_with", "pdb_path", "poa1_signature", "poa2_signature")
+
+
+def _init_state():
+    ss = st.session_state
+    ss.setdefault("run_path", None)        # the analysis folder this session writes to
+    ss.setdefault("proteins_path", None)   # merged -f reference (all species)
+    ss.setdefault("ref_raw", [])           # protein FASTAs as uploaded in step 1
+    ss.setdefault("ref_swap", False)       # source headers are Specie_Protein -> swap them
+    ss.setdefault("ref_uploads", [])       # the same files after optional header normalisation
+    ss.setdefault("params_poa1", {})
+    # step 5's filter form; see STATE POLICY above. Kept as one dict so leaving step 5 and coming
+    # back restores the whole form, not a subset of it.
+    ss.setdefault("params_poa2", {})
+    ss.setdefault("params_mhcii", {})      # step 2: IEDB alleles and peptide length
+    ss.setdefault("params_viz", {})        # step 7: 3D representation controls
+    ss.setdefault("pdb_path", None)        # step 7: the uploaded structure, kept by path
+    # Reopening an analysis loads its files back onto their own steps. The flag survives the
+    # rerun that follows adoption, because the analysis context does not exist yet when the
+    # button is clicked; the summary is kept so the sidebar can say what came back.
+    ss.setdefault("restore_pending", False)
+    ss.setdefault("restored_summary", [])
+    ss.setdefault("restored_source", "none")
+    # Step 1, POA0 search. Each answer narrows the next question, so the intermediate listings
+    # are kept: re-querying UniProt on every rerun would make the form unusable.
+    ss.setdefault("poa0_taxa", [])         # candidate organisms for the typed name
+    ss.setdefault("poa0_taxon", None)      # the chosen one
+    ss.setdefault("poa0_proteins", [])     # its protein entries
+    ss.setdefault("poa0_regions", [])      # regions of the chosen protein
+    ss.setdefault("poa0_entry", None)      # the chosen protein's UniProt entry, to avoid refetching
+    ss.setdefault("poa0_structures", [])   # structures covering the chosen protein
+    ss.setdefault("cons_mode_local", True)  # step 4: local reimplementation vs. manual CSV upload
+    # one *list* of files per method (b2/b3/p/n/x) so several species can be analysed together;
+    # 'm' (MHC-II) stays a single directory of Protein_Specie.html files
+    ss.setdefault("poa1_sources", {})
+    ss.setdefault("prepared_b2", [])       # Prepared records from the BepiPred-2.0 adapter
+    ss.setdefault("poa1_result", None)
+    ss.setdefault("threshold", 70)
+    ss.setdefault("cons_operator", ">=")   # '>=' conserved | '<' unique — must match the POA2 objective
+    ss.setdefault("conservancy_ready", False)
+    ss.setdefault("comparison_sets", {})   # SPECIE -> comparison FASTA path
+    ss.setdefault("poa2_result", None)
+    # the parameters 'poa2_result' was produced with, so a table left on screen after the form
+    # changed can be told apart from the output of the values currently shown
+    ss.setdefault("poa2_ran_with", None)
+    ss.setdefault("poa1_signature", None)
+    ss.setdefault("poa2_signature", None)
+    return ss
+
+
+ss = _init_state()
+ctx: backend.WorkContext = None   # bound by _select_run() before any step renders
+
+
+def _collect_sources():
+    """All per-species prediction files, keyed by POA1 method argument."""
+    src = {k: list(v) for k, v in ss.poa1_sources.items() if v}
+    if ss.prepared_b2:
+        src.setdefault("b2", []).extend(pr.b2_json for pr in ss.prepared_b2)
+    return src
+
+
+def _poa1_signature():
+    paths = [ss.proteins_path]
+    paths.extend(path for group in _collect_sources().values() for path in group)
+    return backend.input_fingerprint(paths, ss.params_poa1)
+
+
+def _clear_poa2():
+    ss.poa2_result = None
+    ss.poa2_ran_with = None
+    ss.poa2_signature = None
+
+
+def _invalidate_changed_inputs():
+    changed = False
+    if ss.poa1_signature is not None and ss.poa1_signature != _poa1_signature():
+        ss.poa1_result = None
+        ss.poa1_signature = None
+        ss.conservancy_ready = False
+        _clear_poa2()
+        changed = True
+    if ss.poa2_signature is not None and ss.poa2_signature != backend.input_fingerprint(
+            [ss.proteins_path, ctx.conservancy_csv_dir]):
+        _clear_poa2()
+        changed = True
+    return changed
+
+
+def _refresh_reference(allow_clear: bool = False):
+    """
+    Merge every reference FASTA (uploaded + rebuilt by the adapter) into a single ``-f``.
+
+    With nothing to merge the current ``-f`` is kept unless ``allow_clear`` — step 1 re-renders on
+    every interaction, and a reference adopted elsewhere (e.g. resumed from ``results/`` in step 5)
+    must not be wiped just because no file is sitting in the uploader.
+    """
+    parts = list(ss.ref_uploads) + [pr.reference_fasta for pr in ss.prepared_b2]
+    if not parts:
+        if allow_clear:
+            ss.proteins_path = None
+        return ss.proteins_path
+    if len(parts) == 1:
+        ss.proteins_path = parts[0]
+    else:
+        try:
+            ss.proteins_path = backend.merge_fastas(parts,
+                                                    str(ctx.inputs_dir / "proteins_all.fasta"))
+        except ValueError as exc:
+            # The merge refuses two records that claim the same ID with different sequences,
+            # rather than pick one. Uncaught, that refusal reached Streamlit as a traceback —
+            # and because the uploads live in session state, it came back on every rerun, so the
+            # step could not even be used to remove the offending file. The previous ``-f`` is
+            # kept: it is still the reference the earlier steps ran against.
+            st.error(f"Não consegui unir os FASTAs de proteínas: {exc}. Se dois arquivos trazem "
+                     f"o mesmo cabeçalho com sequências diferentes, remova ou renomeie um deles.")
+        else:
+            # The merge lands in inputs/ like an upload, but it arrives from here instead of from
+            # an uploader, so it is recorded here too. Otherwise reopening the analysis would meet
+            # a file with no provenance, fall back to its name, and warn about guesswork in an
+            # analysis whose record is in fact complete. Only on success: a merge that failed
+            # wrote nothing to record.
+            backend.record_input(ctx, ss.proteins_path, role="merged_reference",
+                                 original_name="proteins_all.fasta")
+    return ss.proteins_path
+
+
+def _read_proteins():
+    if not ss.proteins_path:
+        return []
+    return [(rec.id, str(rec.seq)) for rec in SeqIO.parse(ss.proteins_path, "fasta")]
+
+
+# --------------------------------------------------------------------------- analysis folder
+def _reset_analysis_state():
+    """Drop everything tied to the previous analysis — its paths point into another folder."""
+    for key in _ANALYSIS_KEYS:
+        del ss[key]
+    _init_state()
+
+
+def _adopt_run(path: Path):
+    ss.run_path = str(path)
+    _reset_analysis_state()
+    ss.restore_pending = True      # the files are loaded on the next run, once ctx is bound
+    st.rerun()
+
+
+def _restore_analysis_files(context):
+    """
+    Put every file of a reopened analysis back on the step it was used in.
+
+    Reopening used to restore only the conservancy CSVs and the reference, behind a button on
+    step 5. Everything else stayed on disk while the interface showed empty fields, so continuing
+    an analysis meant uploading by hand what the analysis already contained.
+
+    Runs once per adoption, not on every rerun: after it the session state is the authority, and
+    repeating it would undo edits made since — re-adding a prediction file the user has just
+    cleared, for instance.
+    """
+    restored = backend.restore_analysis(context)
+    if not restored.anything:
+        ss.restored_summary = []
+        return
+
+    if restored.references:
+        ss.ref_raw = restored.references
+        ss.ref_uploads = list(restored.references)
+    ss.ref_swap = restored.ref_swap
+    ss.prepared_b2 = list(restored.prepared_b2)
+    for method, files in restored.prediction_files.items():
+        ss.poa1_sources.setdefault(method, list(files))
+    ss.comparison_sets.update(restored.comparison_sets)
+    # The forms are state of the analysis as much as its files are: step 2's HTML files were
+    # produced with particular alleles and step 3's table with particular filters, and offering
+    # the files back beside the initial defaults invites re-running a step with inputs that do
+    # not match what is on screen — the silent form reversal the STATE POLICY above exists for,
+    # here across sessions instead of across steps.
+    for key, values in restored.params.items():
+        ss[key] = dict(values)
+    if restored.structure:
+        ss.pdb_path = restored.structure
+    if restored.poa1_result is not None:
+        ss.poa1_result = restored.poa1_result
+    if restored.poa2_result is not None:
+        ss.poa2_result = restored.poa2_result
+    if restored.conservancy_csvs:
+        ss.conservancy_ready = True
+        # The threshold and operator belong to the CSVs, not to the form: read them back the same
+        # way step 5 does, so a reopened analysis does not sit on the initial default.
+        source = conservancy_parser.inspect_directory(str(context.conservancy_csv_dir))
+        if source.threshold is not None:
+            ss.threshold = int(source.threshold)
+        if source.operator:
+            ss.cons_operator = (">=" if conservancy_parser.operator_family(source.operator) == "ge"
+                                else "<")
+
+    # The -f the analysis actually ran with is adopted as it stands when one was recorded. It is
+    # not always rebuildable from the parts: with the swap box ticked, step 1's -f is
+    # proteins_normalized.fasta, and ref_uploads holds the raw files whose headers are still
+    # Specie_Protein — rebuilding from those hands POA1 a different set of species than the one
+    # the analysis was run on, without a word. Only when nothing was recorded is it merged here.
+    if restored.merged_reference:
+        ss.proteins_path = restored.merged_reference
+    else:
+        _refresh_reference()
+    ss.restored_summary = restored.summary()
+    ss.restored_source = restored.source
+
+
+def _full_reset():
+    """
+    Start over from nothing: every field, every result, and the analysis binding itself.
+
+    ``_reset_analysis_state`` deliberately keeps the filter parameters, because opening a second
+    analysis usually means running the same parameters over other data. The sidebar button is the
+    opposite intent — a clean slate — so this clears the form keys and the widget keys too, which
+    includes the step selector, and leaves ``run_path`` unset so the session lands back on the
+    analysis picker and a *new folder* is created there.
+
+    This function itself touches no files — from the sidebar button the previous analysis stays
+    in ``results/`` to compare against, and a fresh folder is what keeps its files from mixing
+    into the next test. It is also called right after :func:`poa.gui.backend.delete_run`, where
+    the folder is already gone and clearing the state is what stops the session from holding
+    paths into it.
+    """
+    for key in list(ss.keys()):
+        del ss[key]
+    _init_state()
+
+
+def _select_run() -> backend.WorkContext:
+    """
+    Bind this session to one analysis folder, asking which before anything else runs.
+
+    Every analysis gets its own ``results/DDMMAAAA-NOME_DO_TESTE``, so a second run of the same
+    data never overwrites the first and the two can be compared side by side.
+    """
+    root = backend.default_results_root()
+
+    if ss.run_path:
+        path = Path(ss.run_path)
+        # Every run leaves a full DEBUG log inside its own analysis folder. That is what makes a
+        # run reproducible across environments: the analysis is tuned on one machine and executed
+        # on another, and the log travels with the results instead of with the terminal.
+        use_log_file(str(path / "poa.log"))
+        with st.sidebar:
+            st.markdown("### Análise")
+            st.success(f"**{path.name or root.name}**")
+            c_switch, c_new = st.columns(2)
+            with c_switch:
+                if st.button("Trocar de análise", width="stretch",
+                             help="Abrir outra análise já gravada, mantendo os parâmetros de "
+                                  "filtragem desta."):
+                    ss.run_path = None
+                    st.rerun()
+            with c_new:
+                if st.button("🆕 Nova análise", type="primary", width="stretch",
+                             help="Limpa todos os campos e resultados e cria uma pasta nova. "
+                                  "A análise atual continua gravada em results/."):
+                    _full_reset()
+                    st.rerun()
+        return backend.open_run(root, path)
+
+    runs = backend.list_runs(root)
+    st.title("Pipeline de Otimização de Antígenos (POA)")
+    st.header("Escolha a análise")
+    st.caption(f"Cada análise fica na sua própria pasta dentro de `{root}`, nomeada "
+               "`DDMMAAAA-NOME_DO_TESTE`. Assim uma nova execução não sobrescreve a anterior e dá "
+               "para comparar as duas.")
+
+    tab_new, tab_open = st.tabs(["Nova análise", f"Abrir existente ({len(runs)})"])
+    with tab_new:
+        label = st.text_input("Nome do teste", placeholder="ex.: DENV world set")
+        if label.strip():
+            st.caption(f"Pasta: `{backend.run_dir_name(label)}`")
+        if st.button("Criar análise", type="primary", disabled=not label.strip()):
+            _adopt_run(backend.create_run(root, label).root)
+    with tab_open:
+        if not runs:
+            st.info("Nenhuma análise encontrada ainda. Crie a primeira na outra aba.")
+        else:
+            def _fmt(i):
+                run = runs[i]
+                when = run.date.strftime("%d/%m/%Y") if run.date else "sem data"
+                return f"{run.label} — {when} — {run.progress}"
+
+            picked = st.selectbox("Análises gravadas", range(len(runs)), format_func=_fmt)
+            chosen = runs[picked]
+            st.code(str(chosen.path), language=None)
+            if chosen.legacy:
+                st.info("Esta é a pasta de resultados anterior à convenção de pastas datadas. Ela "
+                        "continua utilizável onde está — nada foi movido.")
+            if st.button("Abrir análise"):
+                _adopt_run(chosen.path)
+            _delete_run_panel(root, chosen)
+    st.stop()
+
+
+def _delete_run_panel(root, chosen) -> None:
+    """
+    Delete the selected analysis, behind a confirmation that cannot be clicked through.
+
+    Removing an analysis throws away predictions that took API calls and minutes to produce, and
+    there is no undo — so the confirmation is typing the folder name, not a second button. A
+    button pair is a reflex; typing the name is a decision, and it also makes it impossible to
+    delete a *different* analysis than the one being read about.
+    """
+    with st.expander("🗑️ Apagar esta análise", expanded=False):
+        st.caption(f"Remove a pasta `{chosen.path.name}` e tudo dentro dela — predições, CSVs de "
+                   "conservância, planilhas do POA2 e o log. **Não tem desfazer** e nada vai para "
+                   "a lixeira.")
+        if chosen.legacy:
+            st.info("Esta é a pasta de resultados anterior à convenção datada. Apague-a pelo "
+                    "explorador de arquivos se for mesmo o que você quer.")
+            return
+
+        files = [p for p in chosen.path.rglob("*") if p.is_file()]
+        size = backend.human_size(sum(p.stat().st_size for p in files))
+        st.write(f"**{len(files)} arquivo(s)**, {size} — {chosen.progress}")
+
+        typed = st.text_input(f"Para confirmar, digite `{chosen.path.name}`",
+                              key=f"del_{chosen.path.name}", placeholder=chosen.path.name)
+        match = typed.strip() == chosen.path.name
+        if st.button("Apagar definitivamente", type="primary", disabled=not match,
+                     key=f"delbtn_{chosen.path.name}"):
+            try:
+                removed = backend.delete_run(root, chosen.path)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                st.error(f"Não foi possível apagar: {exc}")
+                return
+            # The deleted folder may be the one this session is bound to, or one it has paths
+            # into; dropping the whole session state is the only way to be sure nothing points
+            # at files that no longer exist.
+            _full_reset()
+            st.success(f"`{removed['folder']}` apagada ({removed['files']} arquivo(s), "
+                       f"{backend.human_size(removed['bytes'])}).")
+            st.rerun()
+
+
+# --------------------------------------------------------------------------- sidebar
+st.sidebar.title("🧬 POA")
+st.sidebar.caption("Pipeline de Otimização de Antígenos")
+
+ctx = _select_run()
+
+# Adoption happens before ctx exists, so the actual loading waits for here — the first rerun in
+# which the analysis folder is bound. Clearing the flag first means a failure to restore cannot
+# put the session in a loop that retries on every interaction.
+if ss.restore_pending:
+    ss.restore_pending = False
+    _restore_analysis_files(ctx)
+
+STEPS = [
+    "1 · Proteínas & Parâmetros",
+    "2 · Predições (auto/manual)",
+    "3 · POA1 & Relatório",
+    "4 · Conservancy Analysis",
+    "5 · POA2 (conservação + topologia)",
+    "6 · Resultados",
+    "7 · Visualização (2D/3D)",
+]
+
+
+def _status_icon(done: bool) -> str:
+    return "✅" if done else "⬜"
+
+
+with st.sidebar:
+    st.markdown("### Progresso")
+    st.write(f"{_status_icon(bool(ss.proteins_path))} Proteínas carregadas")
+    st.write(f"{_status_icon(bool(_collect_sources()))} Resultados de predição")
+    st.write(f"{_status_icon(ss.poa1_result is not None)} POA1 executado")
+    st.write(f"{_status_icon(ss.conservancy_ready)} Conservancy pronta")
+    st.write(f"{_status_icon(ss.poa2_result is not None)} POA2 executado")
+    if ss.restored_summary:
+        with st.expander(f"📂 {len(ss.restored_summary)} item(ns) recarregados", expanded=False):
+            for line in ss.restored_summary:
+                st.caption(line)
+            if ss.restored_source == "inferred":
+                st.warning("Esta análise é anterior ao registro de procedência, então os arquivos "
+                           "foram classificados pelo nome. Confira se cada um está na etapa certa; "
+                           "a partir desta execução a origem passa a ser gravada.")
+            elif ss.restored_source == "mixed":
+                st.warning("Parte dos arquivos desta análise é anterior ao registro de "
+                           "procedência e foi classificada pelo nome; o resto tem origem "
+                           "gravada. Confira se cada um está na etapa certa.")
+    st.divider()
+    # Keyed so it shows up in session state and is therefore cleared by _full_reset — an unkeyed
+    # radio keeps its selection internally, and "Nova análise" would land on whatever step the
+    # previous analysis was left on instead of step 1.
+    step = st.radio("Etapa", STEPS, key="step_radio")
+    st.divider()
+    st.markdown("### Resultados")
+    st.caption("Tudo desta análise é gravado aqui. Outra análise, outra pasta — repetir uma "
+               "execução nesta sobrescreve os arquivos de mesmo nome:")
+    st.code(str(ctx.root), language=None)
+
+
+st.title("Pipeline de Otimização de Antígenos (POA)")
+
+
+# =========================================================================== STEP 1
+def _poa0_search_panel():
+    """
+    POA0 inside step 1: find the protein in the databases instead of supplying the FASTA.
+
+    Four questions, each narrowing the next, because none of them has a safe automatic answer —
+    an organism name matches several taxa, a virus has several proteins, and a polyprotein is
+    not itself a target. The intermediate listings live in session state: re-querying UniProt on
+    every Streamlit rerun would make the form unusable.
+
+    Writes through :func:`poa.core.dbsearch.run_poa0`, the same function the command line calls,
+    so the GUI and ``POA0_v1.0.py`` cannot drift apart.
+    """
+    with st.expander("🔎 Não tenho o FASTA — buscar pela espécie (POA0)", expanded=False):
+        st.caption("Busca em UniProt, InterPro, PDBe e RCSB. Precisa de internet. "
+                   "O arquivo gerado já sai no cabeçalho `Proteína_Espécie_ID` e entra "
+                   "direto como `-f`.")
+
+        name = st.text_input("Nome do organismo", key="poa0_name",
+                             placeholder="Oropouche virus")
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            search = st.button("1. Buscar organismo", disabled=not name)
+        with c2:
+            descendants = st.checkbox(
+                "Incluir cepas e isolados (`taxonomy_id`)", key="poa0_desc",
+                help=HELP["poa0_descendants"])
+
+        if search:
+            try:
+                ss.poa0_taxa = dbsearch.list_taxa(name)
+                ss.poa0_taxon = None
+                ss.poa0_proteins, ss.poa0_regions, ss.poa0_structures = [], [], []
+            except (ServiceError, ServiceUnavailable) as exc:
+                st.error(f"Busca falhou: {exc}")
+                return
+            if not ss.poa0_taxa:
+                st.warning(f"Nenhum organismo no UniProt corresponde a “{name}”.")
+
+        if not ss.poa0_taxa:
+            return
+
+        taxon = st.selectbox("2. Qual táxon?", ss.poa0_taxa, format_func=str,
+                             key="poa0_taxon_pick")
+        if st.button("Listar proteínas deste táxon"):
+            try:
+                ss.poa0_taxon = taxon
+                ss.poa0_proteins = dbsearch.list_proteins(
+                    taxon.taxon_id, include_descendants=descendants, limit=25)
+                ss.poa0_regions, ss.poa0_structures = [], []
+            except (ServiceError, ServiceUnavailable) as exc:
+                st.error(f"Não consegui listar as proteínas: {exc}")
+                return
+
+        if not ss.poa0_proteins:
+            return
+
+        st.caption("Ordenadas por: revisada (SwissProt) primeiro, depois as que têm estrutura, "
+                   "depois as mais longas. A primeira raramente é a escolha errada, mas confira — "
+                   "o melhor antígeno nem sempre é a proteína mais bem ranqueada.")
+        protein = st.selectbox("3. Qual proteína?", ss.poa0_proteins, format_func=str,
+                               key="poa0_protein_pick")
+        if st.button("Listar regiões desta proteína"):
+            try:
+                ss.poa0_entry = database_client.get_entry(protein.accession)
+                ss.poa0_regions = database_client.list_regions(protein.accession,
+                                                               entry=ss.poa0_entry)
+                ss.poa0_structures = database_client.list_structures(protein.accession, limit=15)
+            except (ServiceError, ServiceUnavailable) as exc:
+                st.error(f"Não consegui listar as regiões: {exc}")
+                return
+
+        if not ss.poa0_regions:
+            return
+
+        st.caption("Uma poliproteína inteira não é um alvo vacinal; uma de suas proteínas maduras "
+                   "ou domínios é. `Chain` são proteínas maduras (só em entradas SwissProt), "
+                   "`PDB` é o trecho que uma estrutura resolve.")
+        whole = f"(sequência inteira — {protein.length} aa)"
+        options = [whole] + [str(r) for r in ss.poa0_regions]
+        picked = st.selectbox("4. Qual região?", options, key="poa0_region_pick")
+        region = None if picked == whole else ss.poa0_regions[options.index(picked) - 1]
+
+        st.divider()
+        c3, c4 = st.columns(2)
+        with c3:
+            default_name = dbsearch.sanitize_token(region.name if region else protein.name, "PROT")
+            token_name = st.text_input("Campo de proteína no cabeçalho", default_name,
+                                       key="poa0_token_name", help=HELP["poa0_token_name"])
+        with c4:
+            organism = ss.poa0_taxon.scientific_name if ss.poa0_taxon else ""
+            token_specie = st.text_input("Campo de espécie (sigla)",
+                                         dbsearch.species_token(organism),
+                                         key="poa0_token_specie",
+                                         help=HELP["poa0_token_specie"])
+
+        structure_id = ""
+        if ss.poa0_structures:
+            labels = ["(não baixar estrutura)"] + [str(s) for s in ss.poa0_structures]
+            chosen = st.selectbox("Baixar também uma estrutura do RCSB?", labels,
+                                  key="poa0_structure_pick", help=HELP["poa0_structure"])
+            if chosen != labels[0]:
+                structure_id = ss.poa0_structures[labels.index(chosen) - 1].pdb_id
+            st.caption("A estrutura baixada aqui já vem com o mapeamento SIFTS gravado no "
+                       "relatório, que é o que a etapa 7 usa para acertar a numeração dos resíduos.")
+
+        if st.button("⬇️ Gerar o FASTA", type="primary",
+                     disabled=not (token_name and token_specie)):
+            args = SimpleNamespace(
+                s="", a=protein.accession, d=str(ctx.inputs_dir),
+                r=f"{region.start}-{region.end}" if region else "",
+                nome=token_name, sigla=token_specie, estrutura=structure_id,
+                descendentes=descendants, limite=25, l="")
+            try:
+                report = dbsearch.run_poa0(args)
+            except (ServiceError, ServiceUnavailable, SystemExit) as exc:
+                st.error(f"Não consegui gerar o FASTA: {exc}")
+                return
+
+            fasta = report["arquivos"]["fasta"]
+            # Adopted exactly like an upload, so the rest of step 1 — the header table, the
+            # ambiguous-residue check, the merge into -f — treats it identically.
+            if fasta not in ss.ref_raw:
+                ss.ref_raw = list(ss.ref_raw) + [fasta]
+            # POA0 writes these itself rather than going through save_upload, so they are recorded
+            # here — otherwise reopening the analysis would have to guess what they are from a
+            # name POA0 composed ('<PROT>_<SPECIE>.fasta' looks like any other FASTA).
+            backend.record_input(ctx, fasta, role="reference",
+                                 original_name=Path(fasta).name)
+            if report["arquivos"].get("estrutura"):
+                ss.pdb_path = report["arquivos"]["estrutura"]
+                backend.record_input(ctx, ss.pdb_path, role="structure",
+                                     original_name=Path(ss.pdb_path).name)
+
+            st.success(f"`{Path(fasta).name}` gerado: {report['sequencia']['tamanho']} aa, "
+                       f"cabeçalho `{report['cabecalho']}`.")
+            if report["arquivos"].get("estrutura"):
+                info = report["estrutura"]["cabecalho"]
+                st.info(f"Estrutura `{report['estrutura']['pdb_id']}` baixada e já carregada na "
+                        f"etapa 7: {info.get('molecule', '?')} · {info.get('organism', '?')}")
+            for warning in report.get("avisos", []):
+                st.warning(warning)
+            st.caption("Deixe a caixa de inverter cabeçalhos **desmarcada** abaixo: o POA0 já "
+                       "grava no formato `Proteína_Espécie_ID`.")
+
+
+def step_inputs():
+    st.header("1 · Proteínas e parâmetros do POA1")
+    _poa0_search_panel()
+    st.write("Envie o(s) arquivo(s) FASTA com as proteínas/poliproteínas usadas nas predições "
+             "(cabeçalho no formato `Proteína_Espécie_ID`, ex.: `E_DENV1_ref`). "
+             "**Para analisar mais de uma espécie**, inclua todas as proteínas — no mesmo FASTA "
+             "ou em vários arquivos; eles são unidos em um único `-f`.")
+    ups = st.file_uploader("FASTA de proteínas (-f)", type=["fasta", "fa", "faa", "txt"],
+                           accept_multiple_files=True, help=HELP["proteins_fasta"])
+    if ups:
+        ss.ref_raw = [backend.save_upload(ctx.inputs_dir, f"ref_{i}_{u.name}", u.getvalue(),
+                                         ctx=ctx, role="reference", original_name=u.name)
+                      for i, u in enumerate(ups)]
+
+    swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `denv1_ns1`) — inverter "
+                       "os dois primeiros campos", value=ss.ref_swap, key="ref_swap_cb",
+                       help=HELP["swap_headers"])
+    ss.ref_swap = swap
+
+    if ss.ref_raw:
+        if swap:
+            ss.ref_uploads = [backend.normalize_fasta_headers(
+                ss.ref_raw, str(ctx.inputs_dir / "proteins_normalized.fasta"), swap=True)]
+            # Written here rather than uploaded, so its provenance is recorded here — see the
+            # merge in _refresh_reference.
+            backend.record_input(ctx, ss.ref_uploads[0], role="merged_reference",
+                                 original_name="proteins_normalized.fasta")
+        else:
+            ss.ref_uploads = list(ss.ref_raw)
+        st.success(f"{len(ss.ref_raw)} arquivo(s) de proteínas carregado(s).")
+    _refresh_reference()
+
+    if ss.proteins_path:
+        rows = backend.parse_fasta_headers(ss.proteins_path)
+        species = backend.species_in_fasta(ss.proteins_path)
+        total_aa = sum(r["length"] for r in rows)
+        st.write(f"**{len(rows)} sequência(s)**, {total_aa} resíduos no total — veja como cada "
+                 "cabeçalho foi interpretado e o que cada registro contém:")
+        st.dataframe(pd.DataFrame([{"Cabeçalho": r["header"], "Proteína": r["protein"],
+                                    "Espécie": r["specie"], "ID": r["id"],
+                                    "Resíduos": r["length"],
+                                    "Ambíguos": r["ambiguous"] or "—"} for r in rows]),
+                     width="stretch", hide_index=True)
+
+        empty = [r["header"] for r in rows if r["length"] == 0]
+        if empty:
+            st.error("Registro(s) sem sequência: " + ", ".join(empty) +
+                     ". Um cabeçalho sem resíduos não serve de referência para a conservância.")
+        with_x = [r["header"] for r in rows if "X" in r["ambiguous"]]
+        if with_x:
+            st.warning("Sequência(s) com o resíduo ambíguo `X`: " + ", ".join(with_x) +
+                       ". O POA1 recusa epítopos que contenham `X` (checagem de integridade do "
+                       "`-f`) — resolva antes de executar a etapa 3.")
+        other_amb = sorted({c for r in rows for c in r["ambiguous"] if c != "X"})
+        if other_amb:
+            st.caption("Outros resíduos não-padrão presentes: " + ", ".join(other_amb) +
+                       " — não bloqueiam o POA1, mas afetam o cálculo de identidade.")
+
+        if not all(r["ok"] for r in rows):
+            st.error("Há cabeçalhos sem separador `_`, dos quais nenhuma espécie pode ser extraída. "
+                     "Use `Proteína_Espécie_ID` (ex.: `NS1_DENV1_ref`).")
+        elif species:
+            st.success(f"{len(species)} espécie(s) identificada(s): " + ", ".join(species))
+            st.caption("Se a coluna Espécie mostrar o nome da proteína, marque a caixa de inversão acima.")
+        else:
+            st.error("Nenhuma espécie identificada nos cabeçalhos. Use o formato "
+                     "`Proteína_Espécie_ID` (ex.: `NS1_DENV1_ref`) — sem ele o POA não consegue "
+                     "separar as espécies nas etapas 3 e 4.")
+
+    st.subheader("Parâmetros de filtragem (opcionais)")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        bmin = st.number_input("Bepipred min (bmin)", 0, 100, ss.params_poa1.get("bmin", 0),
+                               help=HELP["len_min"])
+        bmax = st.number_input("Bepipred max (bmax)", 0, 100, ss.params_poa1.get("bmax", 0),
+                               help=HELP["len_max"])
+    with c2:
+        pmin = st.number_input("PAP min (pmin)", 0, 100, ss.params_poa1.get("pmin", 0),
+                               help=HELP["len_min"])
+        pmax = st.number_input("PAP max (pmax)", 0, 100, ss.params_poa1.get("pmax", 0),
+                               help=HELP["len_max"])
+    with c3:
+        xmin = st.number_input("Outros min (xmin)", 0, 100, ss.params_poa1.get("xmin", 0),
+                               help=HELP["len_min"])
+        xmax = st.number_input("Outros max (xmax)", 0, 100, ss.params_poa1.get("xmax", 0),
+                               help=HELP["len_max"])
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        mhla = st.selectbox("Classe HLA (MHC-II)", ["DR", "DP", "DQ"],
+                            index=["DR", "DP", "DQ"].index(ss.params_poa1.get("mhla", "DR")),
+                            help=HELP["mhla"])
+    with c5:
+        mic = st.number_input("IC50 threshold (mic, nM)", 0, 50000, ss.params_poa1.get("mic", 50),
+                              help=HELP["mic"])
+    with c6:
+        export = st.checkbox("Exportar .xlsx por método (-e)", value=ss.params_poa1.get("e", "n") == "y")
+
+    ss.params_poa1 = dict(bmin=bmin, bmax=bmax, pmin=pmin, pmax=pmax, xmin=xmin, xmax=xmax,
+                          mhla=mhla, mic=mic, e="y" if export else "n")
+    # Step 1 as it now stands, so reopening this analysis finds it rather than the defaults. The
+    # FASTA list is a *selection*: the uploader replaces ss.ref_raw rather than adding to it, and
+    # a correction uploaded over an earlier file must not come back beside the file it replaced.
+    backend.record_step_state(ctx, references=list(ss.ref_raw), ref_swap=bool(ss.ref_swap),
+                              params_poa1=dict(ss.params_poa1))
+    if ss.proteins_path:
+        st.success("Parâmetros salvos.")
+    else:
+        st.warning("Envie o FASTA de proteínas para continuar.")
+
+
+# =========================================================================== STEP 2
+def _automate_bepipred3():
+    with st.status("Executando BepiPred-3.0 (local)…", expanded=True) as status:
+        try:
+            res = bepipred_client.predict(ss.proteins_path, cache=ctx.cache())
+            path = backend.save_upload(ctx.inputs_dir, "bepipred3.fasta", res.content.encode("utf-8"),
+                                       ctx=ctx, role="prediction", method="b3")
+            ss.poa1_sources["b3"] = [path]
+            ss.poa1_sources.pop("b2", None)
+            ss.prepared_b2 = []
+            status.update(label=f"BepiPred-3.0 concluído ({res.source}).", state="complete")
+        except (ServiceUnavailable, ServiceError) as exc:
+            status.update(label="BepiPred-3.0 indisponível.", state="error")
+            st.warning(f"{exc}\n\nUse o upload manual abaixo (plano B).")
+
+
+def _automate_antigenic():
+    with st.status("Executando EMBOSS antigenic (local)…", expanded=True) as status:
+        try:
+            res = antigenic_client.predict(ss.proteins_path, cache=ctx.cache())
+            pap_txt = antigenic_client.to_pap_txt(res.content, ss.proteins_path)
+            path = backend.save_upload(ctx.inputs_dir, "pap_antigenic.txt", pap_txt.encode("utf-8"),
+                                       ctx=ctx, role="prediction", method="p")
+            ss.poa1_sources["p"] = [path]
+            status.update(label=f"EMBOSS antigenic concluído ({res.source}).", state="complete")
+        except (ServiceUnavailable, ServiceError) as exc:
+            status.update(label="EMBOSS antigenic indisponível.", state="error")
+            st.warning(f"{exc}\n\nUse o upload manual abaixo (plano B).")
+
+
+def _mhcii_targets(seqs):
+    """
+    Resolve every reference header into the fields its result file is written under.
+
+    Done *before* the first request, not inside the prediction loop: the batch is published
+    all-or-nothing, so a header rejected on the last of ten records used to cost nine round
+    trips to the IEDB whose results were then thrown away with the staged batch. The whole
+    contract is only honest if the input is refused before anything is spent on it.
+
+    Two fields are enough — ``Proteína_Espécie`` is the name step 2 asks for in the manual
+    upload and what POA1 reads with an empty ``ID_Sequence``. What cannot be accepted is a
+    header with no species at all: the old default of ``SP`` invented one.
+    """
+    targets, seen = [], set()
+    for rec_id, seq in seqs:
+        parts = str(rec_id).upper().split("_", 2)
+        if len(parts) < 2 or not all(parts):
+            raise ValueError(f"Referência sem espécie no cabeçalho: {rec_id}; "
+                             f"use Proteína_Espécie[_ID].")
+        name = "_".join(parts)
+        if name in seen:
+            raise ValueError(f"Referência duplicada: {rec_id}; cada Proteína_Espécie[_ID] "
+                             f"precisa ser único — um sobrescreveria o resultado do outro.")
+        seen.add(name)
+        reference_id = parts[2] if len(parts) > 2 else ""
+        # Validates the very name ``write_result_file`` will build, which is the other way this
+        # loop could raise after the network had already been used.
+        safe_child(ctx.mhcii_dir, f"{name}.html")
+        targets.append((rec_id, seq, parts[0], parts[1], reference_id))
+    return targets
+
+
+def _mhcii_managed_names():
+    """
+    Top-level entries of the MHC-II folder that POA1 would consolidate as predictions.
+
+    The staging wrapper replaces the names it is given, so this has to match what the reader
+    sees, not what is convenient to list: ``files_map_MHCIIBD`` walks subdirectories and matches
+    ``.html`` without regard to case. Listing only ``*.html`` at the top level left
+    ``sub/OLD_SP.html`` and ``OLD_SP.HTML`` in place, to be read alongside the new batch.
+    """
+    if not ctx.mhcii_dir.is_dir():
+        return []
+    managed = []
+    for entry in sorted(ctx.mhcii_dir.iterdir()):
+        if entry.name.startswith(".poa_"):          # the stage and the archive, not predictions
+            continue
+        if entry.is_file() and entry.suffix.lower() == ".html":
+            managed.append(entry.name)
+        elif entry.is_dir() and any(p.suffix.lower() == ".html" for p in entry.rglob("*")):
+            managed.append(entry.name)
+    return managed
+
+
+def _automate_mhcii(alleles: str, length: int):
+    seqs = _read_proteins()
+    if not seqs:
+        st.warning("Carregue o FASTA de proteínas primeiro.")
+        return
+    try:
+        targets = _mhcii_targets(seqs)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    _clear_poa2()
+    with st.status("Consultando a API do IEDB (MHC-II) por proteína…", expanded=True) as status:
+        try:
+            with staged_outputs(ctx.mhcii_dir, _mhcii_managed_names()) as stage:
+                for rec_id, seq, protein, specie, reference_id in targets:
+                    res = mhcii_client.predict(seq, alleles, length=length, cache=ctx.cache())
+                    mhcii_client.write_result_file(res.content, protein, specie, str(stage),
+                                                   reference_id=reference_id)
+                    st.write(f"• {rec_id}: ok ({res.source})")
+            ss.poa1_sources["m"] = [str(ctx.mhcii_dir)]
+            status.update(label=f"MHC-II: {len(seqs)} referência(s) concluída(s).", state="complete")
+        except (ServiceUnavailable, ServiceError, ValueError, OSError) as exc:
+            status.update(label="MHC-II falhou; o lote anterior foi preservado.", state="error")
+            st.error(str(exc))
+
+
+def _import_bepipred2_original():
+    """Adapter for original manual-workflow BepiPred-2.0 JSONs (non-conforming antigen keys).
+
+    Handles both shapes of the real data: one JSON per species, and a single JSON whose antigens
+    are several organisms (a submission of ``denv1_ns1`` + ``denv2_ns1`` comes back keyed
+    ``denv1``/``denv2``, which the ``Protein_Specie_ID`` regex cannot resolve). Each antigen gets
+    its own species/protein, and successive imports are accumulated.
+    """
+    st.markdown("**BepiPred-2.0 (.json)**")
+    st.caption("O arquivo é verificado no envio. Se as chaves de antígeno já seguirem "
+               "`Proteína_Espécie_ID`, ele é usado direto; caso contrário (`Sequence`, `denv1`, …) "
+               "você mapeia cada antígeno abaixo — reescrevemos o cabeçalho de **cada um** e "
+               "reconstruímos as proteínas de referência (-f) a partir do próprio array `AA` do "
+               "JSON. Vários antígenos no mesmo arquivo podem ser espécies diferentes.")
+
+    raw = st.file_uploader("BepiPred-2.0 (.json)", type=["json"], key="up_b2_raw",
+                           help=HELP["b2_json"])
+    if raw is not None:
+        raw_path = backend.save_upload(ctx.inputs_dir, f"raw_{raw.name}", raw.getvalue(),
+                                        ctx=ctx, role="bepipred2_raw", original_name=raw.name)
+        try:
+            keys = backend.antigen_keys(raw_path)
+            bad = backend.nonconforming_antigen_keys(raw_path)
+        except Exception as exc:  # noqa: BLE001 - malformed upload must not crash the app
+            st.error(f"Não foi possível ler o JSON: {exc}")
+            keys, bad = [], []
+
+        if not keys:
+            st.error("Nenhum bloco `antigens` encontrado no JSON.")
+        elif not bad:
+            # keys already conform -> the parser resolves species on its own, no adapter needed
+            ss.poa1_sources["b2"] = [raw_path]
+            ss.poa1_sources.pop("b3", None)
+            st.success(f"{len(keys)} antígeno(s) com chave no padrão `Proteína_Espécie_ID`: " +
+                       ", ".join(f"`{k}`" for k in keys[:6]) + (" …" if len(keys) > 6 else "") +
+                       ". Arquivo usado diretamente.")
+            st.info("Lembre-se de que o FASTA de proteínas (-f) da etapa 1 precisa conter essas "
+                    "mesmas espécies.")
+        else:
+            ss.poa1_sources.pop("b2", None)   # the raw file is unusable as-is
+            st.error("As chaves de antígeno deste JSON não seguem `Proteína_Espécie_ID`: " +
+                     ", ".join(f"`{k}`" for k in bad[:6]) + (" …" if len(bad) > 6 else "") +
+                     ". Sem mapeá-las, o POA1 não consegue identificar a espécie e todos os "
+                     "epítopos ficam sem espécie. Preencha os campos abaixo.")
+            st.write(f"**{len(keys)} antígeno(s) no arquivo.** Informe a espécie e a proteína de "
+                     "cada um — o cabeçalho passa a ser `Proteína_Espécie_ID`.")
+            mapping = {}
+            for i, key in enumerate(keys):
+                tokens = str(key).upper().split("_")
+                vis = "visible" if i == 0 else "collapsed"
+                c1, c2, c3 = st.columns([2, 2, 2])
+                with c1:
+                    st.text_input("Chave no JSON", str(key), disabled=True,
+                                  key=f"rd_key_{i}", label_visibility=vis)
+                with c2:
+                    sp = st.text_input("Espécie", tokens[0], key=f"rd_sp_{i}",
+                                       label_visibility=vis, help=HELP["map_specie"])
+                with c3:
+                    prot = st.text_input("Proteína", tokens[1] if len(tokens) > 1 else "E",
+                                         key=f"rd_prot_{i}", label_visibility=vis,
+                                         help=HELP["map_protein"])
+                mapping[key] = ((prot.strip().upper() or "E"), sp.strip().upper(), "ref")
+
+            if st.button("Adaptar e adicionar", key="rd_import_btn"):
+                if any(not v[1] for v in mapping.values()):
+                    st.warning("Informe a espécie de todos os antígenos antes de adaptar.")
+                    return
+                already = {sp for pr in ss.prepared_b2 for sp in pr.species}
+                dup = sorted({v[1] for v in mapping.values()} & already)
+                if dup:
+                    st.warning(f"Já importado(s): {', '.join(dup)}. Limpe as importações antes de repetir.")
+                    return
+                first = mapping[keys[0]]
+                prep = backend.import_bepipred2(ctx, raw.name, raw.getvalue(),
+                                                specie=first[1], protein=first[0], mapping=mapping)
+                ss.prepared_b2.append(prep)
+                ss.poa1_sources.pop("b3", None)
+                _refresh_reference()
+                st.success("Antígenos adaptados: " +
+                           ", ".join(f"`{e.header}` ({len(e.sequence)} aa)" for e in prep.entries))
+                st.info("Proteínas de referência reconstruídas do JSON e somadas ao -f (etapa 1).")
+                if prep.has_x:
+                    st.warning("A referência contém o resíduo ambíguo 'X' — o POA1 vai recusá-la "
+                               "(checagem de integridade do -f) até que ele seja resolvido.")
+
+    if ss.prepared_b2:
+        st.write("**Espécies importadas:** " +
+                 ", ".join(f"`{e.header}`" for pr in ss.prepared_b2 for e in pr.entries))
+        if st.button("Limpar espécies importadas", key="rd_clear_btn"):
+            ss.prepared_b2 = []
+            _refresh_reference(allow_clear=True)
+            st.rerun()
+
+
+def _manual_upload(label: str, key: str, types, filename: str):
+    """
+    Upload one file *per species* for a method; they are merged into the single POA1 input.
+
+    The tooltip comes from ``HELP['upload_<method>']`` — each tool's file format is the thing
+    people actually get wrong, so the guidance is per method rather than generic.
+    """
+    ups = st.file_uploader(label, type=types, key=f"up_{key}", accept_multiple_files=True,
+                           help=HELP.get(f"upload_{key}"))
+    if ups:
+        stem = filename.rsplit(".", 1)[0]
+        ss.poa1_sources[key] = [
+            backend.save_upload(ctx.inputs_dir, f"{stem}_{i}_{up.name}", up.getvalue(),
+                                ctx=ctx, role="prediction", method=key, original_name=up.name)
+            for i, up in enumerate(ups)
+        ]
+        st.success(f"{label}: {len(ups)} arquivo(s) — " + ", ".join(u.name for u in ups))
+
+
+def _human_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB"):
+        if n < 1024 or unit == "MB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} MB"
+
+
+def _render_source_previews(sources):
+    """
+    Show what each collected prediction file holds, before POA1 ever reads it.
+
+    Step 2 is where a wrong file or an unreadable header convention is cheapest to fix; without
+    this the first sign of either was an empty or mis-grouped table two steps later.
+    """
+    st.subheader("Conteúdo dos arquivos enviados")
+    st.caption("Este é o **conteúdo bruto** de cada arquivo, lido do próprio arquivo. Os epítopos "
+               "em si são extraídos pelo POA1 (etapa 3), com os parâmetros de filtragem da etapa 1 "
+               "— por isso aqui aparece o que o arquivo traz, não o que o POA1 vai selecionar.")
+
+    previews = backend.summarize_sources(sources)
+    all_species = sorted({sp for p in previews for sp in p.species})
+    if all_species:
+        st.info("Espécies encontradas nos arquivos de predição: " + ", ".join(all_species))
+
+    for prev in previews:
+        unit = {"fasta": "registro(s)", "json": "antígeno(s)",
+                "dir": "arquivo(s)", "text": "linha(s)"}[prev.kind]
+        count = "?" if prev.n_records is None else prev.n_records
+        head = f"{prev.label} · `{prev.name}` — {count} {unit} · {_human_bytes(prev.size_bytes)}"
+        with st.expander(head, expanded=len(previews) == 1):
+            if prev.species:
+                st.write("**Espécies:** " + ", ".join(prev.species))
+            if prev.proteins:
+                st.write("**Proteínas:** " + ", ".join(prev.proteins))
+            if prev.rows:
+                st.dataframe(pd.DataFrame(prev.rows), width="stretch",
+                             hide_index=True, height=240)
+            if prev.head:
+                st.code(prev.head, language=None)
+            for note in prev.notes:
+                st.warning(note)
+
+
+def step_predictions():
+    st.header("2 · Predições de epítopos")
+    if not ss.proteins_path:
+        st.warning("Volte à etapa 1 e carregue o FASTA de proteínas.")
+        return
+    st.caption("Automatize quando houver via limpa; caso o serviço falhe, use o upload manual (plano B). "
+               "Pelo menos um método é obrigatório. **Multi-espécie:** envie um arquivo por espécie "
+               "em cada método — eles são unidos automaticamente antes do POA1.")
+
+    # B cell — BepiPred
+    with st.expander("🅱️ Células B — BepiPred", expanded=True):
+        cols = st.columns([1, 2])
+        with cols[0]:
+            if st.button("Automatizar BepiPred-3.0 (local)"):
+                _automate_bepipred3()
+        with cols[1]:
+            st.caption("BepiPred-3.0 via pacote local `bp3`. BepiPred-2.0: use upload do JSON.")
+        _manual_upload("Upload BepiPred-3.0 (.fasta)", "b3", ["fasta", "fa", "txt"], "bepipred3.fasta")
+        st.markdown("---")
+        _import_bepipred2_original()
+
+    # B cell — PAP/IMED via EMBOSS
+    with st.expander("🅱️ Células B — PAP/IMED (antigenicidade)", expanded=False):
+        if st.button("Automatizar via EMBOSS antigenic (local)"):
+            _automate_antigenic()
+        _manual_upload("Upload PAP/IMED (.txt)", "p", ["txt"], "pap.txt")
+
+    # Tc — NetCTL
+    with st.expander("🅃 Células T-citotóxicas — NetCTL 1.2", expanded=False):
+        st.caption("Sem API/binário Windows. Automação por navegador é opcional (etapa futura). "
+                   "Plano B: faça a predição no site e envie o .html.")
+        _manual_upload("Upload NetCTL (.html)", "n", ["html", "htm"], "netctl.html")
+
+    # Th — MHC-II
+    with st.expander("🅃 Células T-auxiliares — MHC-II Binding (IEDB)", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            alleles = st.text_input("Alelos (separados por vírgula)",
+                                    ss.params_mhcii.get("alleles", "HLA-DRB1*01:01"),
+                                    help=HELP["mhcii_alleles"])
+        with c2:
+            length = st.number_input("Comprimento do peptídeo", 9, 25,
+                                     int(ss.params_mhcii.get("length", 15)),
+                                     help=HELP["mhcii_length"])
+        ss.params_mhcii = dict(alleles=alleles, length=int(length))
+        if st.button("Automatizar MHC-II (API IEDB)"):
+            _automate_mhcii(alleles, int(length))
+        st.caption("Plano B: envie os .html (um por proteína, nomeados `Proteína_Espécie.html`).")
+        ups = st.file_uploader("Upload MHC-II (.html, múltiplos)", type=["html", "htm"],
+                               accept_multiple_files=True, key="up_m_multi",
+                               help=HELP["mhcii_upload"])
+        if ups:
+            for up in ups:
+                backend.save_upload(ctx.mhcii_dir, up.name, up.getvalue(),
+                                    ctx=ctx, role="prediction", method="m", original_name=up.name)
+            ss.poa1_sources["m"] = [str(ctx.mhcii_dir)]
+            st.success(f"{len(ups)} arquivo(s) MHC-II carregado(s).")
+
+    # Others
+    with st.expander("➕ Outros preditores (FASTA padronizado)", expanded=False):
+        _manual_upload("Upload outros (.fasta)", "x", ["fasta", "fa", "txt"], "others.fasta")
+
+    st.divider()
+    sources = _collect_sources()
+    # Every choice this step offers is a replacement, not an addition: an uploader overwrites its
+    # method's list, BepiPred-2.0 and 3.0 evict each other because they are one B-cell method, and
+    # "Limpar espécies importadas" drops the adapted imports without any file arriving. Recorded
+    # here, at the one point that sees the whole step, because that is the only place the answer
+    # exists — and recorded even when it is empty, which is exactly what clearing produces.
+    backend.record_step_state(ctx, sources={k: list(v) for k, v in ss.poa1_sources.items() if v},
+                              prepared_b2=[pr.b2_json for pr in ss.prepared_b2],
+                              params_mhcii=dict(ss.params_mhcii))
+    if not sources:
+        st.warning("Nenhum resultado de predição ainda.")
+        return
+
+    st.success("Métodos prontos: " +
+               ", ".join(f"{k} ({len(v)} arquivo(s))" for k, v in sorted(sources.items())))
+    _render_source_previews(sources)
+
+
+# =========================================================================== STEP 3
+def step_poa1():
+    st.header("3 · POA1 — consolidação, ranqueamento e relatório")
+    sources = _collect_sources()
+    if not ss.proteins_path or not sources:
+        st.warning("Complete as etapas 1 e 2 (proteínas + ao menos um método).")
+        return
+
+    ref_species = backend.species_in_fasta(ss.proteins_path)
+    st.caption(f"Referência (-f): {len(ref_species)} espécie(s) — " +
+               (", ".join(ref_species) or "nenhuma identificada"))
+    if st.button("▶️ Executar POA1", type="primary"):
+        ss.poa1_result = None
+        ss.poa1_signature = None
+        ss.conservancy_ready = False
+        _clear_poa2()
+        with st.status("Executando POA1…", expanded=True) as status:
+            try:
+                files = backend.consolidate_sources(sources, ctx.inputs_dir)
+                for key, path in sorted(files.items()):
+                    n = len(sources[key])
+                    st.write(f"• {key}: {Path(path).name}" + (f" ({n} arquivos unidos)" if n > 1 else ""))
+                result = backend.run_poa1(ctx, files, ss.params_poa1, ss.proteins_path)
+                ss.poa1_result = result
+                ss.poa1_signature = _poa1_signature()
+                ss.conservancy_ready = False
+                status.update(label="POA1 concluído.", state="complete")
+            except Exception as exc:
+                status.update(label="POA1 falhou.", state="error")
+                st.exception(exc)
+                return
+
+    if ss.poa1_result is not None:
+        df = ss.poa1_result.predictions
+
+        diag = backend.species_diagnostics(ss.proteins_path, df)
+        if diag["predicted"]:
+            st.success("Espécies identificadas nos epítopos: " + ", ".join(diag["predicted"]))
+        else:
+            st.error("Nenhuma espécie foi identificada nos epítopos.")
+        if diag["unnamed"]:
+            st.error("Há epítopos sem espécie no cabeçalho. Os arquivos de predição precisam usar "
+                     "`Proteína_Espécie_ID`; para JSONs originais do BepiPred-2.0 use o adaptador "
+                     "da etapa 2.")
+        if diag["missing_from_reference"]:
+            st.error("Espécies presentes nas predições mas **ausentes do FASTA de referência (-f)**: "
+                     + ", ".join(diag["missing_from_reference"]) +
+                     ". Adicione as proteínas dessas espécies na etapa 1 — sem elas a análise de "
+                     "conservância (etapa 4) compara epítopos com as proteínas erradas.")
+        if diag["unpredicted"]:
+            st.warning("Espécies no -f sem nenhum epítopo predito: " + ", ".join(diag["unpredicted"]))
+        if diag["reference"] and diag["predicted"] and not set(diag["reference"]) & set(diag["predicted"]):
+            st.warning("Nenhuma espécie do -f coincide com as das predições. Verifique na etapa 1 a "
+                       "tabela de leitura dos cabeçalhos — se a coluna Espécie estiver mostrando o "
+                       "nome da proteína, marque a caixa de inversão `Espécie_Proteína`.")
+
+        st.subheader("Epítopos consolidados")
+        st.dataframe(df, width="stretch", height=320)
+
+        summ = backend.predictions_summary(df)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(px.bar(summ["by_method"], x="Method", y="count",
+                                   title="Epítopos por método"), width="stretch")
+        with c2:
+            st.plotly_chart(px.bar(summ["by_species"], x="Specie", y="count",
+                                   title="Epítopos por espécie"), width="stretch")
+        st.plotly_chart(px.bar(summ["length_hist"], x="length", y="count",
+                               title="Distribuição de comprimento dos epítopos"), width="stretch")
+
+        report = Path(ss.poa1_result.report_path)
+        if report.exists():
+            with st.expander("📄 Relatório de análise (Analysis_report.txt)"):
+                st.code(report.read_text(encoding="utf-8"))
+
+
+# =========================================================================== STEP 4
+def _declare_uploaded_threshold():
+    """
+    Record the threshold/operator behind manually uploaded conservancy CSVs.
+
+    POA2 validates what it is filtering against this record. IEDB spells both values in the CSV
+    header, so they are read from there when present and only asked for when they are not.
+    """
+    csv_dir = str(ctx.conservancy_csv_dir)
+    try:
+        source = conservancy_parser.inspect_directory(csv_dir)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    if source.origin == "meta":
+        st.success(f"Registrado: limiar **{conservancy_parser.format_threshold(source.threshold)}%**, "
+                   f"critério **{source.operator}**. A etapa 5 vai conferir estes valores.")
+        return
+
+    if source.origin == "header":
+        detected_op = source.operator or ">="
+        st.info(f"O cabeçalho dos CSVs declara limiar "
+                f"**{conservancy_parser.format_threshold(source.threshold)}%** e critério "
+                f"**{detected_op}**.")
+        if st.button("Registrar estes valores", key="cons_adopt_header"):
+            conservancy_parser.write_metadata(csv_dir, source.threshold, detected_op, source="iedb")
+            ss.threshold = int(source.threshold)
+            ss.cons_operator = ">=" if conservancy_parser.operator_family(detected_op) == "ge" else "<"
+            st.rerun()
+        return
+
+    st.warning("O cabeçalho destes CSVs não traz o limiar usado. Informe-o abaixo — sem isso a "
+               "etapa 5 não tem como validar o que está filtrando.")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        man_t = st.number_input("Limiar usado (%)", 1, 100, int(ss.threshold), key="man_cons_t",
+                                help=HELP["cons_declared_threshold"])
+    with c2:
+        man_op = st.radio("Critério usado", [">=", "<"],
+                          index=0 if ss.cons_operator == ">=" else 1,
+                          format_func=lambda op: "Conservados (≥)" if op == ">=" else "Únicos (<)",
+                          horizontal=True, key="man_cons_op", help=HELP["poa2_declared_op"])
+    if st.button("Registrar", key="cons_declare_btn"):
+        conservancy_parser.write_metadata(csv_dir, man_t, man_op, source="manual")
+        ss.threshold = int(man_t)
+        ss.cons_operator = man_op
+        st.rerun()
+
+
+def step_conservancy():
+    st.header("4 · Epitope Conservancy Analysis")
+    if ss.poa1_result is None:
+        st.warning("Execute o POA1 (etapa 3) primeiro.")
+        return
+    st.caption("O IEDB não oferece API nem versão local desta ferramenta. O POA reimplementa o "
+               "cálculo localmente (Bui et al., 2007). Você também pode enviar os CSVs manualmente.")
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        ss.threshold = st.number_input("Limiar de identidade de sequência (%)", 1, 100,
+                                       ss.threshold, help=HELP["cons_threshold"])
+    with c2:
+        ss.cons_operator = st.radio(
+            "Critério", [">=", "<"],
+            index=0 if ss.cons_operator == ">=" else 1,
+            format_func=lambda op: "Conservados (≥ limiar)" if op == ">=" else "Únicos (< limiar)",
+            horizontal=True, help=HELP["cons_operator"])
+    st.caption("O critério escolhido aqui decide quais proteínas contam como *match* e fica gravado "
+               "junto dos CSVs. Ele precisa ser o mesmo objetivo da etapa 5 — o POA2 recusa a "
+               "execução se divergirem, em vez de apenas rotular a coluna com o valor errado.")
+    modes = ["Reimplementação local (recomendado)", "Upload manual dos CSVs"]
+    mode = st.radio("Modo", modes, index=0 if ss.cons_mode_local else 1,
+                    help=HELP["cons_mode"])
+    ss.cons_mode_local = mode == modes[0]
+
+    # POA1 wrote one epitope FASTA per species; each must be compared against its OWN protein set.
+    epitope_files = sorted(ctx.conservancy_epitopes_dir.glob("*_epitopes.fasta"))
+    species = [f.name[: -len("_epitopes.fasta")].upper() for f in epitope_files]
+    if not species:
+        st.warning("O POA1 não gerou nenhum arquivo de epítopos por espécie. Verifique a etapa 3.")
+        return
+    st.info(f"{len(species)} espécie(s) a analisar: " + ", ".join(species))
+
+    if mode.startswith("Reimplementação"):
+        st.write("Conjunto de proteínas para comparação. O padrão é o FASTA da etapa 1, "
+                 "**filtrado por espécie**: os epítopos de cada espécie são comparados apenas com "
+                 "as proteínas dela. Envie abaixo um conjunto próprio (ex.: o *world set* de "
+                 "diversidade) para qualquer espécie que precise de um.")
+        ref_counts = backend.count_proteins_by_specie(ss.proteins_path) if ss.proteins_path else {}
+        for sp in species:
+            up = st.file_uploader(f"FASTA de comparação para {sp} (opcional)",
+                                  type=["fasta", "fa", "faa", "txt"], key=f"comp_{sp}",
+                                  help=HELP["comparison_set"])
+            if up is not None:
+                ss.comparison_sets[sp] = backend.save_upload(
+                    ctx.inputs_dir, f"comparison_{sp}.fasta", up.getvalue(),
+                    ctx=ctx, role="comparison_set", specie=sp, original_name=up.name)
+            chosen = ss.comparison_sets.get(sp)
+            if chosen:
+                n_comp = len(backend.parse_fasta_headers(chosen))
+                st.caption(f"↳ {sp}: conjunto próprio (`{Path(chosen).name}`), {n_comp} proteína(s).")
+            else:
+                n_comp = ref_counts.get(sp, 0)
+                if n_comp:
+                    st.caption(f"↳ {sp}: {n_comp} proteína(s) do -f.")
+                else:
+                    st.warning(f"↳ {sp}: nenhuma proteína dessa espécie no -f — será comparada com "
+                               "o conjunto completo (identidades misturam espécies). Envie um "
+                               "conjunto próprio ou corrija o FASTA da etapa 1.")
+            # One protein cannot produce a conservancy: matched/total with total = 1 leaves only
+            # 0% and 100%, and which one appears depends on whether that protein is the one the
+            # epitopes were predicted on — not on how conserved anything is.
+            if n_comp == 1:
+                st.warning(f"↳ {sp}: com **uma única proteína** de comparação o limiar não "
+                           "discrimina nada — a conservância só pode dar **0% ou 100%**, e nenhum "
+                           "dos dois significa coisa alguma. Dá 100% se essa proteína for aquela "
+                           "em que os epítopos foram preditos (eles casam consigo mesmos) e 0% "
+                           "caso contrário, por mais parecidas que as sequências sejam — e aí o "
+                           "POA2 descarta tudo e a planilha sai vazia. Envie um conjunto de "
+                           "diversidade (ex.: o *world set* da espécie).")
+
+        if st.button("▶️ Calcular conservância (local)", type="primary"):
+            ss.conservancy_ready = False
+            _clear_poa2()
+            with st.status("Calculando conservância…", expanded=True) as status:
+                try:
+                    written = conservancy_client.run_conservancy_for_dir(
+                        str(ctx.conservancy_epitopes_dir), ss.proteins_path, float(ss.threshold),
+                        str(ctx.conservancy_csv_dir),
+                        specie_proteins={k: v for k, v in ss.comparison_sets.items() if k in species},
+                        operator=ss.cons_operator)
+                    ss.conservancy_ready = len(written) > 0
+                    status.update(label=f"{len(written)} CSV(s) gerado(s).", state="complete")
+                except Exception as exc:
+                    status.update(label="Falha no cálculo de conservância.", state="error")
+                    st.exception(exc)
+    else:
+        st.caption("O POA2 confere com que limiar os CSVs foram gerados antes de filtrar. Quando o "
+                   "cabeçalho do arquivo traz essa informação (é o caso dos downloads do IEDB), ela "
+                   "é lida daí; senão, informe abaixo.")
+        ups = st.file_uploader("CSVs da Conservancy Analysis (IEDB)", type=["csv"],
+                               accept_multiple_files=True, key="cons_csvs",
+                               help=HELP["cons_csv_upload"])
+        if ups:
+            previous = conservancy_parser.map_EpConservFiles(str(ctx.conservancy_csv_dir))
+            managed = {Path(p).relative_to(ctx.conservancy_csv_dir).parts[0] for p in previous}
+            managed.add(conservancy_parser.METADATA_FILENAME)
+            with staged_outputs(ctx.conservancy_csv_dir, managed) as stage:
+                for up in ups:
+                    backend.save_upload(stage, up.name, up.getvalue())
+                current = {p.name: p.read_bytes() for p in stage.glob("*.csv")}
+                old = {Path(p).relative_to(ctx.conservancy_csv_dir).as_posix(): Path(p).read_bytes()
+                       for p in previous}
+                meta = ctx.conservancy_csv_dir / conservancy_parser.METADATA_FILENAME
+                if current == old and meta.exists():
+                    (stage / meta.name).write_bytes(meta.read_bytes())
+                else:
+                    _clear_poa2()
+            ss.conservancy_ready = True
+            st.success(f"{len(ups)} CSV(s) carregado(s).")
+
+        if list(ctx.conservancy_csv_dir.glob("*.csv")):
+            _declare_uploaded_threshold()
+
+    csvs = sorted(ctx.conservancy_csv_dir.glob("*.csv"))
+    if csvs:
+        st.divider()
+        st.subheader("Resultado da conservância")
+        overview = backend.conservancy_overview(ctx.conservancy_csv_dir)
+        for error in overview.attrs.get("errors", []):
+            st.warning(f"Não foi possível resumir o CSV: {error}")
+        if not overview.empty:
+            st.dataframe(overview, width="stretch", hide_index=True)
+            st.caption("**Com match** = epítopos com ao menos uma proteína casando no limiar com "
+                       "que o arquivo foi gerado. É sobre essa coluna que o filtro `-m` do POA2 "
+                       "age na etapa 5.")
+            silent = overview[overview["Com match"] == 0]["Espécie"].tolist()
+            if silent:
+                st.warning("Espécie(s) sem nenhum epítopo com match: " + ", ".join(silent) +
+                           ". Elas serão excluídas se o filtro de proteínas com match (-m) for maior que zero.")
+            st.plotly_chart(
+                px.bar(overview.melt(id_vars="Espécie", value_vars=["Epítopos", "Com match"],
+                                     var_name="Medida", value_name="count"),
+                       x="Espécie", y="count", color="Medida", barmode="group",
+                       title="Epítopos por espécie e quantos têm match"),
+                width="stretch")
+
+        for c in csvs:
+            with st.expander(f"📄 {c.name}"):
+                try:
+                    st.dataframe(pd.read_csv(c), width="stretch", height=300)
+                except (OSError, ValueError, pd.errors.ParserError) as exc:
+                    st.warning(f"Não foi possível ler {c.name}: {exc}")
+                _download(c, f"⬇️ {c.name}", "text/csv")
+
+        st.caption("Gravados em:")
+        st.code(str(ctx.conservancy_csv_dir), language=None)
+
+
+# =========================================================================== STEP 5
+def _resume_from_results():
+    """
+    Continue an analysis from what is already in ``results/``.
+
+    The session state lives in the Streamlit process, but the files do not — so a run started in
+    one environment (Windows) can be finished in another (WSL, the only place pyTMHMM builds)
+    without redoing steps 1-4.
+    """
+    found = backend.resumable_run(ctx)
+    csvs, fastas = found["csvs"], found["references"]
+    if not csvs:
+        return
+    st.divider()
+    st.info(f"Encontrei {len(csvs)} CSV(s) de conservância já gravados nesta análise "
+            f"(`{ctx.conservancy_csv_dir.name}/`): " + ", ".join(c.name for c in csvs))
+    st.caption("Use isto para continuar uma análise iniciada em outra sessão — por exemplo ao "
+               "trocar do Windows para a WSL só para rodar o POA2. Abra a mesma análise dos dois "
+               "lados: os arquivos estão na pasta, não na sessão.")
+
+    if not fastas:
+        st.warning(f"Nenhum FASTA de proteínas em `{ctx.inputs_dir.name}/` — o POA2 precisa do `-f`.")
+        return
+    # Label each candidate with the species its headers carry, so a file that merged
+    # non-conforming headers is visible as such instead of being picked by accident.
+    wanted = sorted({c.name[: -len("_conservancy.csv")].upper() for c in csvs})
+    labels, paths = [], []
+    for f in fastas:
+        species = backend.species_in_fasta(str(f))
+        covers = [sp for sp in wanted if sp in species]
+        mark = "✅" if len(covers) == len(wanted) else ("⚠️" if covers else "❌")
+        labels.append(f"{mark} {f.name} — espécies: {', '.join(species) or 'nenhuma'}")
+        paths.append(f)
+    default = next((i for i, f in enumerate(fastas)
+                    if set(wanted) <= set(backend.species_in_fasta(str(f)))), 0)
+    pick = st.selectbox("FASTA de proteínas (-f) usado naquela análise", range(len(labels)),
+                        index=default, format_func=lambda i: labels[i])
+    st.caption(f"O POA2 precisa das proteínas de: {', '.join(wanted)}. Um `-f` com espécies a mais "
+               "(ex.: cabeçalhos não convertidos) faz um mesmo epítopo casar com vários registros.")
+    if st.button("Retomar com estes arquivos"):
+        ss.proteins_path = str(paths[pick])
+        ss.conservancy_ready = True
+        # Adopt the threshold/operator the CSVs were produced with. Resuming used to leave both at
+        # their initial defaults (70 and '>='), which are not a value anyone chose: in a session
+        # that never ran step 4, step 5's fallback then applied 70 to data built at something else.
+        try:
+            resumed = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
+        except ValueError as exc:
+            ss.conservancy_ready = False
+            st.error(str(exc))
+            return
+        if resumed.threshold is not None:
+            ss.threshold = int(resumed.threshold)
+        if resumed.operator:
+            ss.cons_operator = (">=" if conservancy_parser.operator_family(resumed.operator) == "ge"
+                                else "<")
+        # also rebuild the POA1 table from the epitope FASTAs, so the results (etapa 6) and the
+        # 2D/3D views (etapa 7) work in the resumed session too
+        if ss.poa1_result is None:
+            ss.poa1_result = backend.poa1_result_from_disk(ctx)
+        st.rerun()
+
+
+def step_poa2():
+    st.header("5 · POA2 — conservação e topologia de membrana")
+    if not ss.conservancy_ready:
+        st.warning("Prepare a Conservancy Analysis (etapa 4) primeiro.")
+        _resume_from_results()
+        return
+    if not ss.proteins_path:
+        st.warning("O POA2 precisa do FASTA de proteínas (-f) — volte à etapa 1.")
+        return
+    # pyTMHMM gates only the *run*, not the step: everything below except the TMHMM pass is read
+    # from the conservancy CSVs, so on Windows (where pyTMHMM does not build) the parameters and
+    # their effect can still be tuned here before switching to the WSL side to execute.
+    tmhmm_ok = tmhmm_client.is_available()
+
+    # The threshold POA2 applies comes from the data, not from the form: it used to only rename a
+    # column, so a run could report "conservados ≥70%" while filtering CSVs computed at ≤100%.
+    try:
+        source = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
+    except ValueError as exc:
+        _clear_poa2()
+        st.error(str(exc))
+        return
+    if source.origin == "unknown":
+        # Nothing in the directory declares the threshold, so it has to come from the user. This
+        # used to read ss.threshold silently, which is only the value chosen in step 4 when step 4
+        # ran in *this* session — after resuming an analysis from disk it was the initial 70.
+        st.warning("Não foi possível descobrir com que limiar os CSVs desta pasta foram gerados — "
+                   "não há metadados e o cabeçalho não traz o valor. Informe abaixo com que limiar "
+                   "e critério eles foram produzidos. O POA2 vai aplicá-los **sem conseguir "
+                   "validá-lo**; confira antes de usar os resultados.")
+        c_t, c_op = st.columns([1, 2])
+        with c_t:
+            t_value = int(st.number_input("Limiar de identidade (t, %)", 1, 100,
+                                          int(ss.threshold), key="poa2_t_declared",
+                                          help=HELP["poa2_declared_t"]))
+        with c_op:
+            op_value = st.radio(
+                "Critério dos CSVs", [">=", "<"],
+                index=0 if ss.cons_operator == ">=" else 1,
+                format_func=lambda op: "Conservados (≥)" if op == ">=" else "Únicos (<)",
+                horizontal=True, key="poa2_op_declared", help=HELP["poa2_declared_op"])
+        ss.threshold, ss.cons_operator = t_value, op_value
+        st.caption("Para não precisar informar isto de novo, registre o limiar na etapa 4 — ela "
+                   "grava um `conservancy_meta.json` junto dos CSVs, e aí a etapa 5 passa a ler "
+                   "daí e a validar o que está filtrando.")
+    else:
+        t_value, op_value = int(source.threshold), source.operator
+        origem = ("metadados gravados na etapa 4" if source.origin == "meta"
+                  else "cabeçalho dos próprios CSVs")
+        st.info(f"CSVs gerados com limiar "
+                f"**{conservancy_parser.format_threshold(source.threshold)}%** e critério "
+                f"**{op_value}** (lido dos {origem}). São esses os valores que o POA2 aplica.")
+        if source.meta and source.meta.species:
+            weak = sorted(sp for sp, info in source.meta.species.items()
+                          if not info.get("discriminating", True))
+            if weak:
+                st.warning("Espécie(s) cujo conjunto de comparação tinha uma única proteína — o "
+                           "limiar não discriminou nada, e a conservância só podia dar 0% ou "
+                           "100%: " + ", ".join(weak) + ". Refaça a etapa 4 com um conjunto de "
+                           "diversidade se estes resultados forem usados.")
+
+    # Nothing empties this folder, and POA2 merges every CSV under it. A leftover from an earlier
+    # run joins the analysis in silence — the backend logs it, but the log is a file nobody has
+    # open while clicking, so the warning has to be on the page.
+    leftovers = conservancy_parser.stale_csvs(str(ctx.conservancy_csv_dir))
+    if leftovers:
+        st.warning(f"**{len(leftovers)} CSV(s) em `{ctx.conservancy_csv_dir.name}/` não vieram "
+                   f"da última execução da etapa 4** e serão misturados a esta análise: "
+                   + ", ".join(f"`{n}`" for n in leftovers) + ". Apague-os, ou refaça a etapa 4.")
+
+    # The -m the user is about to pick may not be the one that takes effect: the percent column
+    # moves in steps of 100/n, so with a small comparison set a "most of them" value lands on
+    # "all of them". Shown here, next to the field, rather than only in the log.
+    resolucao = conservancy_parser.check_match_resolution(
+        str(ctx.conservancy_csv_dir), float(ss.params_poa2.get("m", 60)))
+    for aviso in resolucao:
+        st.warning(aviso)
+
+    # Every widget here reads its default from ss.params_poa2 and is written back below, so
+    # navigating to another step and returning restores the form instead of resetting the filters
+    # to 60/100/60 — see STATE POLICY at the top of this module.
+    saved = ss.params_poa2
+    objectives = ["conserved", "unique"]
+    # The objective is the one field NOT restored from the saved form: it has to follow the
+    # operator the CSVs were produced with, which is the whole point of reading that operator
+    # back. Restoring it would carry the previous analysis's objective onto CSVs built the other
+    # way round, turning a form that used to agree with the data into a blocked run.
+    default_objective = "unique" if conservancy_parser.operator_family(op_value) == "lt" else "conserved"
+    rf_options = [None, 0, 1, 2, 3]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        objective = st.radio("Objetivo", objectives,
+                             index=objectives.index(default_objective),
+                             format_func=lambda x: "Conservados (≥)" if x == "conserved" else "Únicos (<)",
+                             help=HELP["poa2_objective"])
+        rf = st.selectbox("FASTA por topologia (-rf)",
+                          rf_options,
+                          index=rf_options.index(saved.get("rf")) if saved.get("rf", None) in rf_options else 0,
+                          format_func=lambda v: {None: "não gerar", 0: "todos", 1: "externos",
+                                                 2: "transmembrana", 3: "internos"}[v],
+                          help=HELP["poa2_rf"])
+    with c2:
+        imin = st.number_input("Identidade mín. (%)", 0, 100, int(saved.get("imin", 60)),
+                               help=HELP["poa2_imin"])
+        imax = st.number_input("Identidade máx. (%)", 0, 100, int(saved.get("imax", 100)),
+                               help=HELP["poa2_imax"])
+    with c3:
+        mmatch = st.number_input("% de sequências com match (-m)", 0, 100, int(saved.get("m", 60)),
+                                 help=HELP["poa2_m"])
+        st.metric("Limiar aplicado (t)", f"{op_value} {t_value}%")
+        identity_filter = st.checkbox(
+            "Usar o limiar também como filtro", value=bool(saved.get("idf", False)),
+            help=HELP["poa2_idf"])
+
+    requested_symbol = ">=" if objective == "conserved" else "<"
+    mismatch = (source.origin != "unknown"
+                and conservancy_parser.operator_family(requested_symbol) != source.family)
+    if mismatch:
+        st.error(f"O objetivo escolhido (**{requested_symbol}**) não é o mesmo com que os CSVs "
+                 f"foram gerados (**{source.operator}**). Volte à etapa 4 e recalcule com este "
+                 "critério, ou escolha o objetivo correspondente. Filtrar com um critério e "
+                 "rotular o resultado com outro é exatamente o que esta checagem impede.")
+
+    params = dict(objective=objective, t=t_value, imin=imin, imax=imax, m=mmatch, rf=rf,
+                  idf=identity_filter)
+    ss.params_poa2 = dict(params)   # the form as it now stands, for the next time this step renders
+    # And on disk, for the next time the analysis is opened: these are the scientific parameters,
+    # and the spreadsheet in poa2_out/ is only interpretable beside the filters that produced it.
+    backend.record_step_state(ctx, params_poa2=dict(params))
+
+    # Where the epitopes are lost, computed from the CSVs with the parameters currently on screen.
+    # POA2 only ever reported the survivors, so an empty result could not be told from a bound set
+    # too tight — and this answers it before paying for a TMHMM run.
+    funnel = backend.conservancy_funnel(ctx.conservancy_csv_dir, params)
+    if funnel.empty:
+        st.warning("Não foi possível calcular o efeito dos filtros. Confira os cabeçalhos e o "
+                   "conteúdo dos CSVs na etapa 4; todos devem usar o mesmo limiar de identidade.")
+    if not funnel.empty:
+        st.subheader("Efeito dos filtros de conservância")
+        kept, total = int(funnel["Epítopos"].iloc[-1]), int(funnel["Epítopos"].iloc[0])
+        c1, c2 = st.columns([2, 3])
+        with c1:
+            st.dataframe(funnel, width="stretch", hide_index=True)
+            st.metric("Epítopos que seguem para a topologia", f"{kept} de {total}")
+        with c2:
+            st.plotly_chart(px.bar(funnel, x="Epítopos", y="Etapa", orientation="h",
+                                   title="Epítopos restantes após cada filtro"),
+                            width="stretch")
+        st.caption("Calculado a partir dos CSVs da etapa 4 com os parâmetros acima — ainda sem "
+                   "rodar o TMHMM. A etapa seguinte do POA2 é a topologia de membrana, que não "
+                   "descarta epítopos: apenas acrescenta as colunas `Portion_*`.")
+        if kept == 0:
+            st.error("Nenhum epítopo sobrevive a estes filtros — o POA2 vai produzir uma planilha "
+                     "vazia. Afrouxe o filtro indicado acima como responsável pela queda.")
+
+    if not tmhmm_ok:
+        st.error("**pyTMHMM não está instalado neste ambiente** — sem ele o POA2 não roda. "
+                 "Os parâmetros e o efeito deles acima continuam valendo: ajuste-os aqui e "
+                 "execute do outro lado.")
+        if sys.platform == "win32":
+            st.warning(
+                "No Windows, `pip install pyTMHMM` **não funciona**: não existe *wheel* para "
+                "Windows, o build precisa do Microsoft C++ Build Tools e o pacote (1.3.6) não "
+                "compila contra numpy 2.x (usa `np.int_t`). Rode a interface pela **WSL**, onde o "
+                "ambiente já está pronto — veja `TESTING_WSL.md`:")
+            st.code("wsl\nconda activate poa\ncd /mnt/c/Users/<você>/…/POA_Project\n"
+                    "streamlit run poa/gui/app.py", language="bash")
+            st.caption("Abra `http://localhost:8501` no navegador do Windows e **reabra esta mesma "
+                       "análise** — a pasta `results/` é a mesma nos dois lados, então tudo o que "
+                       "você já gerou continua valendo; basta ir direto para a etapa 5.")
+        else:
+            st.info("Instale no ambiente atual (precisa de compilador C e `numpy<2`):")
+            st.code('pip install "numpy<2"\npip install --no-build-isolation pyTMHMM', language="bash")
+
+    if st.button("▶️ Executar POA2", type="primary", disabled=mismatch or not tmhmm_ok):
+        # Drop the previous run before starting. Without this, a run that raises leaves the old
+        # table on screen under "Saída do POA2", directly below a funnel computed with the new
+        # parameters — reading as if the failed parameters had produced it.
+        ss.poa2_result = None
+        ss.poa2_ran_with = None
+        with st.status("Executando POA2 (conservância + TMHMM)…", expanded=True) as status:
+            try:
+                ss.poa2_result = backend.run_poa2(ctx, params, ss.proteins_path)
+                ss.poa2_ran_with = dict(params)
+                ss.poa2_signature = backend.input_fingerprint([ss.proteins_path, ctx.conservancy_csv_dir])
+                status.update(label="POA2 concluído.", state="complete")
+            except Exception as exc:
+                status.update(label="POA2 falhou.", state="error")
+                st.exception(exc)
+                return
+
+    if ss.poa2_result is not None:
+        st.divider()
+        st.subheader("Saída do POA2")
+        if ss.poa2_ran_with != params:
+            st.warning("Esta tabela é de uma execução **anterior**, com outros parâmetros — os "
+                       "valores agora na tela ainda não foram executados. O funil acima já reflete "
+                       "os valores atuais, então os dois podem discordar. Execute o POA2 de novo "
+                       "para alinhá-los.")
+        result = ss.poa2_result.results
+        st.write(f"**{len(result)} epítopo(s) selecionado(s).** Critério aplicado: "
+                 f"`{ss.poa2_result.type_symbol}`.")
+        st.dataframe(result, width="stretch", height=300)
+        st.caption("Os downloads e o resumo por topologia estão na etapa 6.")
+
+
+# =========================================================================== STEP 6
+def _download(path: Path, label: str, mime: str):
+    if path and path.exists():
+        st.download_button(label, data=path.read_bytes(), file_name=path.name, mime=mime)
+
+
+def step_results():
+    st.header("6 · Resultados finais")
+    if ss.poa2_result is None:
+        st.warning("Execute o POA2 (etapa 5) para ver os resultados finais.")
+        # still offer POA1 downloads
+    if ss.poa2_result is not None:
+        df = ss.poa2_result.results
+        st.subheader("Epítopos selecionados (POA2)")
+        st.dataframe(df, width="stretch", height=320)
+
+        topo = backend.topology_summary(df)
+        if not topo.empty:
+            st.plotly_chart(px.bar(topo, x="region", y="mean_fraction",
+                                   title="Fração média por topologia de membrana"),
+                            width="stretch")
+        st.subheader("Downloads")
+        _download(Path(ss.poa2_result.xlsx_path), "⬇️ Planilha POA2 (.xlsx)",
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if ss.poa2_result.fasta_path:
+            _download(Path(ss.poa2_result.fasta_path), "⬇️ FASTA POA2 (.fasta)", "text/plain")
+
+    if ss.poa1_result is not None:
+        st.subheader("Saídas do POA1")
+        _download(Path(ss.poa1_result.report_path), "⬇️ Relatório (.txt)", "text/plain")
+        for fasta in sorted(ctx.conservancy_epitopes_dir.glob("*.fasta")):
+            _download(fasta, f"⬇️ {fasta.name}", "text/plain")
+
+
+# =========================================================================== STEP 7
+def step_viz():
+    st.header("7 · Visualização dos epítopos (2D / 3D)")
+    if ss.poa1_result is None:
+        st.warning("Execute o POA1 (etapa 3) para ter epítopos a visualizar.")
+        return
+    df = ss.poa1_result.predictions
+
+    if df.empty:
+        st.info("Nenhum epítopo selecionado para visualizar.")
+        if ss.pdb_path and Path(ss.pdb_path).is_file():
+            try:
+                html = viz.build_3dmol_view_html(Path(ss.pdb_path).read_text(encoding="utf-8"), [])
+                _embed_html(html, height=520)
+            except Exception as exc:
+                st.error(f"Não foi possível renderizar a estrutura: {exc}")
+        return
+
+    # --- 2D epitope map (no structure required) ---
+    st.subheader("Mapa 2D de epítopos")
+    st.caption("Cada segmento é um epítopo ao longo da sequência; uma trilha por proteína/espécie, "
+               "colorido por método.")
+    st.plotly_chart(viz.epitope_map_figure(df), width="stretch")
+
+    # --- 3D structure viewer (upload a PDB) ---
+    st.subheader("Estrutura 3D (envie um PDB)")
+    st.caption("Estilo Discovery Studio: epítopos destacados sobre a estrutura. O visualizador usa "
+               "3Dmol.js (precisa de internet para renderizar).")
+
+    saved = ss.params_viz
+    tracks = sorted({f"{r.Protein}|{r.Specie}" for r in df.itertuples()})
+    styles = ["cartoon", "stick", "sphere"]
+    # The track list depends on the POA1 table, so a remembered choice is only offered back while
+    # it still exists; otherwise this would select a protein that is no longer in the results.
+    choice = st.selectbox("Epítopos de qual proteína/espécie destacar?", tracks,
+                          index=tracks.index(saved["track"])
+                          if saved.get("track") in tracks else 0)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        base_style = st.selectbox("Representação", styles,
+                                  index=styles.index(saved.get("style", "cartoon")),
+                                  help=HELP["viz_style"])
+    with c2:
+        surface = st.checkbox("Mostrar superfície", value=bool(saved.get("surface", False)),
+                              help=HELP["viz_surface"])
+    with c3:
+        chain = st.text_input("Cadeia (opcional)", saved.get("chain", ""),
+                              help=HELP["viz_chain"])
+    ss.params_viz = dict(track=choice, style=base_style, surface=surface, chain=chain)
+
+    pdb_up = st.file_uploader("Arquivo .pdb", type=["pdb", "ent"], key="pdb_up",
+                              help=HELP["viz_pdb"])
+    if pdb_up is not None:
+        # An uploader is emptied when its step is not rendered, and this was the one upload read
+        # straight from the widget instead of being saved: leaving step 7 and returning dropped
+        # the structure and the 3D view with it. Saved like every other input and kept by path.
+        ss.pdb_path = backend.save_upload(ctx.inputs_dir, f"structure_{pdb_up.name}",
+                                          pdb_up.getvalue(), ctx=ctx, role="structure",
+                                          original_name=pdb_up.name)
+    if ss.pdb_path and not Path(ss.pdb_path).is_file():
+        ss.pdb_path = None     # the analysis folder was cleaned up under us
+
+    if ss.pdb_path:
+        prot, spec = choice.split("|")
+        ranges = viz.epitope_ranges(df, protein=prot, specie=spec)
+        pdb_text = Path(ss.pdb_path).read_text(encoding="utf-8", errors="replace")
+
+        # What the file *is*, before it is used as if it were the antigen. A PDB identifier says
+        # nothing on sight, and an unrelated structure produces a confident, meaningless figure.
+        _show_structure_identity(pdb_text, Path(ss.pdb_path).name)
+
+        reference, refused = None, None
+        try:
+            reference = backend.reference_sequence(ctx, prot, spec, ss.proteins_path)
+        except (ValueError, OSError, KeyError) as exc:
+            refused = str(exc)
+        report = None
+        if refused is not None:
+            # Refused is not missing. The reference *was* found — in `poa1_out/`, or in several
+            # conflicting copies — and rejected, so sending the user to look for it in `inputs/`
+            # named the wrong folder and the wrong remedy right under the real explanation.
+            st.warning(f"{refused} A estrutura será exibida sem destaque de epítopos.")
+            ranges = []
+        elif reference is None:
+            st.warning(
+                f"Não encontrei em `{ctx.inputs_dir.name}/` a sequência de referência de "
+                f"`{prot}_{spec}`, então não dá para conferir se esta estrutura é dessa proteína. "
+                f"A estrutura será exibida sem destaque de epítopos.")
+            ranges = []
+        else:
+            report = structure_map.map_epitopes(pdb_text, reference["sequence"], ranges,
+                                                chain=chain or None)
+            ranges = report.ranges
+            chain = report.chain
+
+        try:
+            if report is not None and not report.ok:
+                # Rendering the structure plain is still useful — what is refused is the claim
+                # that these residues are the epitopes.
+                st.error("**Estrutura incompatível com as predições.** " + report.warnings[0])
+                st.caption(f"Comparação: `{reference['header']}` ({len(reference['sequence'])} aa) "
+                           f"× cadeia {report.chain} de `{Path(ss.pdb_path).name}` "
+                           f"({report.structure_length} resíduos observados).")
+                html = viz.build_3dmol_view_html(pdb_text, [], chain=chain or None,
+                                                 base_style=base_style, show_surface=surface)
+                _embed_html(html, height=520)
+                st.caption("Estrutura exibida sem destaque. Envie a estrutura desta proteína, "
+                           "ou gere-a pelo POA0 (`--estrutura`), que busca no RCSB a que "
+                           "corresponde à sequência analisada.")
+            else:
+                html = viz.build_3dmol_view_html(pdb_text, ranges, chain=chain or None,
+                                                 base_style=base_style, show_surface=surface)
+                _embed_html(html, height=520)
+                if report is None:
+                    st.caption(f"{len(ranges)} epítopo(s) de {prot}_{spec} destacado(s) em "
+                               f"vermelho (estrutura: `{Path(ss.pdb_path).name}`).")
+                else:
+                    st.success(f"{len(report.ranges)} epítopo(s) de {prot}_{spec} destacado(s) "
+                               f"em vermelho. {report.summary()}")
+                    for warning in report.warnings:
+                        st.warning(warning)
+        except Exception as exc:  # noqa: BLE001 - surface the error to the user, don't crash the app
+            st.error(f"Não foi possível renderizar a estrutura: {exc}")
+    else:
+        st.info("Envie um arquivo .pdb para ver os epítopos destacados na estrutura 3D, "
+                "ou use o POA0 (`--estrutura 6H3X`) para baixar a estrutura certa do RCSB.")
+
+
+def _show_structure_identity(pdb_text: str, filename: str) -> None:
+    """Show the molecule, organism and method the structure file declares in its own header."""
+    from poa.services import database_client
+
+    summary = database_client.structure_summary(pdb_text)
+    if not summary:
+        return
+    label = summary.get("molecule") or summary.get("title") or "?"
+    organism = summary.get("organism", "?")
+    details = [f"**{label}**", organism]
+    if summary.get("method"):
+        details.append(summary["method"])
+    if summary.get("resolution"):
+        details.append(summary["resolution"])
+    st.info(f"`{filename}` contém: " + " · ".join(details)
+            + (f" · cadeias {summary['chains']}" if summary.get("chains") else ""))
+
+
+# --------------------------------------------------------------------------- dispatch
+_DISPATCH = {
+    STEPS[0]: step_inputs,
+    STEPS[1]: step_predictions,
+    STEPS[2]: step_poa1,
+    STEPS[3]: step_conservancy,
+    STEPS[4]: step_poa2,
+    STEPS[5]: step_results,
+    STEPS[6]: step_viz,
+}
+_invalidate_changed_inputs()
+_DISPATCH[step]()
+if _invalidate_changed_inputs():
+    st.rerun()
