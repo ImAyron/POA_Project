@@ -6,9 +6,11 @@ Kept free of Streamlit imports so it can be unit-tested and reused. The Streamli
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -20,6 +22,7 @@ import pandas as pd
 
 from ..core import pipeline
 from ..core.models import STANDARD_COLUMNS
+from ..core.artifacts import safe_child, file_hash
 from ..logging_conf import get_logger
 from ..services import realdata_import
 from ..services.cache import Cache
@@ -216,18 +219,27 @@ def create_run(root: Path, name: str, when: Optional[date] = None) -> WorkContex
     """
     Start a new analysis at ``root/DDMMAAAA-NOME_DO_TESTE`` and return its context.
 
-    A name already used today reuses that folder rather than silently creating a near-duplicate —
-    the point of the convention is that one test has one place.
+    A name already used today gets a numeric suffix; creating never reopens an old run.
     """
     root = Path(root)
-    ctx = WorkContext(root / run_dir_name(name, when), cache_root=root / "cache")
-    meta_path = ctx.root / RUN_METADATA_FILENAME
-    if not meta_path.exists():
-        meta_path.write_text(json.dumps({
-            "label": str(name).strip(),
-            "folder": ctx.root.name,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    base = run_dir_name(name, when)
+    number = 1
+    while True:
+        path = root / (base if number == 1 else f"{base}_{number}")
+        try:
+            path.mkdir()
+            break
+        except FileExistsError:
+            number += 1
+    ctx = WorkContext(path, cache_root=root / "cache")
+    # The loop above only breaks on a mkdir() that succeeded, so this folder was empty a moment
+    # ago and its metadata is always ours to write — an existing run.json is never adopted.
+    (ctx.root / RUN_METADATA_FILENAME).write_text(json.dumps({
+        "label": str(name).strip(),
+        "folder": ctx.root.name,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     return ctx
 
 
@@ -371,6 +383,45 @@ def run_poa2(ctx: WorkContext, params: Dict, proteins_path: str) -> pipeline.Poa
     return pipeline.run_poa2(args)
 
 
+#: ``str(path) -> (size, mtime_ns, digest)``. Streamlit re-runs the whole script on every widget
+#: interaction and each run fingerprints the same inputs up to four times, so without this a
+#: checkbox click costs a full SHA-256 pass over every prediction file — tens of MB each.
+_DIGEST_CACHE: Dict[str, Tuple[int, int, str]] = {}
+
+#: A digest is only remembered once the file has held still this long. Some mounts report mtime
+#: at a coarse resolution, and a rewrite landing in the same tick as the hash would keep both the
+#: size and the mtime — invisible to the check below. Freshly touched files are read again.
+_DIGEST_SETTLE_NS = 2_000_000_000
+
+
+def cached_file_hash(path) -> str:
+    """:func:`file_hash` memoized on (size, mtime): the same digest without re-reading the bytes."""
+    path = Path(path)
+    stat = path.stat()
+    key = str(path)
+    remembered = _DIGEST_CACHE.get(key)
+    if remembered is not None and remembered[:2] == (stat.st_size, stat.st_mtime_ns):
+        return remembered[2]
+    digest = file_hash(path)
+    if time.time_ns() - stat.st_mtime_ns > _DIGEST_SETTLE_NS:
+        _DIGEST_CACHE[key] = (stat.st_size, stat.st_mtime_ns, digest)
+    return digest
+
+
+def input_fingerprint(paths, params=None) -> str:
+    """Content-based identity for a GUI stage, including missing/deleted inputs."""
+    inputs = []
+    for value in sorted(str(p) for p in paths if p):
+        path = Path(value)
+        if path.is_dir():
+            files = sorted(p for p in path.rglob("*") if p.is_file()
+                           and not any(part.startswith(".poa_") for part in p.relative_to(path).parts))
+            inputs.append((value, [(str(p.relative_to(path)), cached_file_hash(p)) for p in files]))
+        else:
+            inputs.append((value, cached_file_hash(path) if path.is_file() else None))
+    return hashlib.sha256(json.dumps([inputs, params], sort_keys=True, default=str).encode()).hexdigest()
+
+
 # --------------------------------------------------------------------------- summaries for charts
 def predictions_summary(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """Return small aggregate tables (by method, by species) for charting the POA1 output."""
@@ -402,8 +453,8 @@ def topology_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 def save_upload(dest_dir: Path, filename: str, data: bytes) -> str:
     """Persist an uploaded file's bytes to ``dest_dir/filename`` and return the path."""
+    path = safe_child(dest_dir, filename)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    path = dest_dir / filename
     path.write_bytes(data)
     return str(path)
 
@@ -447,22 +498,30 @@ def merge_bepipred2(paths: Sequence[str], out_path: str) -> str:
 
 def merge_fastas(paths: Sequence[str], out_path: str) -> str:
     """
-    Concatenate FASTA files, keeping the first record for each duplicated header.
+    Concatenate FASTAs, deduplicating identical records and rejecting conflicting IDs.
 
     Used both for the multi-species ``-f`` reference set and for merging per-species
     BepiPred-3.0 / 'other predictor' FASTAs.
     """
     from Bio import SeqIO
 
-    seen = set()
+    seen = {}
+    records = []
+    for path in paths:
+        for rec in SeqIO.parse(path, "fasta"):
+            key = rec.id.upper()
+            sequence = str(rec.seq)  # case encodes BepiPred-3 predictions; preserve it
+            if key in seen:
+                prior_sequence, prior_path = seen[key]
+                if prior_sequence != sequence:
+                    raise ValueError(f"Conflicting FASTA ID {rec.id!r}: {prior_path} and {path}")
+                continue
+            seen[key] = (sequence, path)
+            records.append(rec)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as out:
-        for path in paths:
-            for rec in SeqIO.parse(path, "fasta"):
-                if rec.id in seen:
-                    continue
-                seen.add(rec.id)
-                out.write(f">{rec.description}\n{str(rec.seq)}\n")
+        for rec in records:
+            out.write(f">{rec.description}\n{str(rec.seq)}\n")
     return out_path
 
 
@@ -885,7 +944,8 @@ def nonconforming_antigen_keys(path: str) -> List[str]:
     return [k for k in realdata_import.antigen_keys(path) if not re.match(BP2_ANTIGEN_KEY, str(k))]
 
 
-def reference_sequence(ctx: "WorkContext", protein: str, specie: str) -> Optional[Dict[str, str]]:
+def reference_sequence(ctx: "WorkContext", protein: str, specie: str,
+                       proteins_path: Optional[str] = None) -> Optional[Dict[str, str]]:
     """
     Find the sequence the predictions for one protein/species ran on.
 
@@ -905,14 +965,23 @@ def reference_sequence(ctx: "WorkContext", protein: str, specie: str) -> Optiona
     """
     from Bio import SeqIO
 
-    for path in sorted(ctx.inputs_dir.glob("*.fasta")):
-        try:
-            records = list(SeqIO.parse(str(path), "fasta"))
-        except Exception:                      # noqa: BLE001 - a malformed input is not fatal here
-            continue
-        for rec in records:
-            parts = str(rec.id).upper().split("_")
-            if len(parts) > 1 and parts[0] == protein.upper() and parts[1] == specie.upper():
-                return {"header": str(rec.id), "sequence": str(rec.seq).upper(),
-                        "path": str(path)}
-    return None
+    manifest_path = ctx.poa1_out_dir / "poa1_manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        path = safe_child(ctx.poa1_out_dir, manifest["reference"])
+        if file_hash(path) != manifest["reference_sha256"]:
+            raise ValueError("A referência salva do POA1 foi alterada; execute o POA1 novamente.")
+    elif proteins_path:
+        path = Path(proteins_path)
+    else:
+        return None  # legacy runs need an explicitly selected reference
+    if not path.is_file():
+        return None
+    matches = []
+    for rec in SeqIO.parse(str(path), "fasta"):
+        parts = str(rec.id).upper().split("_")
+        if len(parts) > 1 and parts[:2] == [protein.upper(), specie.upper()]:
+            matches.append({"header": str(rec.id), "sequence": str(rec.seq).upper(), "path": str(path)})
+    if len({r["sequence"] for r in matches}) > 1:
+        raise ValueError("Há referências diferentes para esta proteína/espécie; selecione uma referência inequívoca antes de destacar epítopos.")
+    return matches[0] if matches else None

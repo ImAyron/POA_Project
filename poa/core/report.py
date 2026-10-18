@@ -12,18 +12,41 @@ from Bio import SeqIO
 
 def checkViability(lenght_seq_dict, dataframe, column_epitopes):
     """
-    Ensures no epitope is longer than the shortest protein sequence in the dataset,
-    which would break the downstream conservancy analysis.
+    Ensures every epitope fits inside the reference it will later be compared against,
+    which would otherwise break the downstream conservancy analysis.
+
+    An epitope is measured against the reference carrying its own ``Protein_Specie`` — comparing
+    it against unrelated proteins only produced false refusals. When the reference set holds
+    nothing under that ``Protein_Specie``, there is no scoped limit to apply, so the original
+    all-references rule stands in: conservancy drops every protein shorter than the epitope from
+    that epitope's denominator, and an oversized epitope with no reference of its own would come
+    out as ``0.00% (0/0)`` instead of stopping the run.
 
     Raises:
-        Exception: If any epitope is longer than the shortest protein sequence.
+        ValueError: If any epitope is longer than the reference it will be compared against.
     """
-    for line in range(len(dataframe[column_epitopes])):
-        sequence = str(dataframe.iat[line, -1])
-        lenght_epitope = len(sequence)
-        for seq in lenght_seq_dict:
-            if lenght_seq_dict[seq] < lenght_epitope:
-                raise Exception(f"ATTENTION: Some of your epitopes (Ex: {dataframe.iat[line, 4]}_{dataframe.iat[line, 5]} ({dataframe.iat[line, 2]}, {dataframe.iat[line, 1]})) have a length greater than the size of the sequence of at least one of the proteins analyzed. Due to the possibility of causing issues in the subsequent analysis (conservation analysis), please reduce the maximum accepted size for the epitopes or consider excluding the protein with the fewest amino acids from the analysis.")
+    if not lenght_seq_dict:
+        return
+    shortest_reference = min(lenght_seq_dict.values())
+    for _, row in dataframe.iterrows():
+        protein, specie = str(row["Protein"]).upper(), str(row["Specie"]).upper()
+        candidates = {key: size for key, size in lenght_seq_dict.items()
+                      if key.upper().split("_")[:2] == [protein, specie]}
+        reference_id = str(row.get("ID_Sequence", "")).upper()
+        exact = f"{protein}_{specie}_{reference_id}"
+        if exact in candidates:
+            candidates = {exact: candidates[exact]}
+        lenght_epitope = len(str(row[column_epitopes]))
+        if candidates:
+            if lenght_epitope > max(candidates.values()):
+                raise ValueError(f"Epitope of {protein}_{specie} has length greater than its matching reference.")
+        elif lenght_epitope > shortest_reference:
+            raise ValueError(
+                f"Epitope of {protein}_{specie} has no matching reference in the -f set and is "
+                f"longer ({lenght_epitope} aa) than the shortest reference there "
+                f"({shortest_reference} aa). Add a {protein}_{specie}_<ID> reference, or check "
+                f"that the predictions and the reference FASTA name this protein the same way."
+            )
 
 
 def checkIntegrity(file):

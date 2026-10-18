@@ -24,6 +24,7 @@ substituir os do site naquele conjunto de dados.
 import argparse
 import csv
 import io
+import math
 import os
 import sys
 
@@ -62,7 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
 def _num(valor) -> float:
     """Converte '67.05%' ou '50.00% (1/2)' no número da frente."""
     texto = str(valor).strip().replace("%", "")
-    return float(texto.split("(")[0].split()[0]) if texto else float("nan")
+    try:
+        number = float(texto.split("(")[0].split()[0])
+    except (ValueError, IndexError) as exc:
+        raise ValueError(f"Metrica ausente ou invalida: {valor!r}") from exc
+    if not math.isfinite(number) or not 0 <= number <= 100:
+        raise ValueError(f"Metrica fora do intervalo finito [0, 100]: {valor!r}")
+    return number
 
 
 def ler_csv(texto: str):
@@ -89,8 +96,22 @@ def ler_csv(texto: str):
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
-    iedb, coluna_iedb = ler_csv(open(args.i, encoding="utf-8", errors="replace").read())
-    local, coluna_local = ler_csv(cc.run_conservancy(args.e, args.p, args.t, args.operador))
+    if not math.isfinite(args.tolerancia) or args.tolerancia < 0:
+        print("ERRO: a tolerancia deve ser finita e nao negativa.", file=sys.stderr)
+        return 2
+    if not math.isfinite(args.t) or not 0 <= args.t <= 100:
+        print("ERRO: limiar deve estar entre 0 e 100.", file=sys.stderr)
+        return 2
+    try:
+        with open(args.i, encoding="utf-8", errors="replace") as handle:
+            iedb, coluna_iedb = ler_csv(handle.read())
+        local, coluna_local = ler_csv(cc.run_conservancy(args.e, args.p, args.t, args.operador))
+    except (OSError, ValueError) as exc:
+        print(f"ERRO: dados invalidos: {exc}", file=sys.stderr)
+        return 2
+    if not iedb or not local:
+        print("ERRO: nao ha epitopos suficientes para validar equivalencia.", file=sys.stderr)
+        return 2
 
     print("COLUNAS")
     print(f"  IEDB  : {coluna_iedb}")

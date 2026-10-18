@@ -49,13 +49,14 @@ def test_cache_is_shared_across_analyses(tmp_path):
     assert b.cache().get("mhcii", "key1", "tsv") == "cached-tsv"
 
 
-def test_same_name_same_day_reuses_the_folder(tmp_path):
+def test_same_name_same_day_creates_a_separate_folder(tmp_path):
     first = backend.create_run(tmp_path, "Teste A", date(2026, 9, 27))
     (first.inputs_dir / "proteins.fasta").write_text(">E_SP_x\nAAA\n")
     again = backend.create_run(tmp_path, "Teste A", date(2026, 9, 27))
 
-    assert again.root == first.root
-    assert (again.inputs_dir / "proteins.fasta").exists()   # nothing was wiped
+    assert again.root != first.root
+    assert (first.inputs_dir / "proteins.fasta").exists()
+    assert not (again.inputs_dir / "proteins.fasta").exists()
 
 
 # --------------------------------------------------------------------------- listing

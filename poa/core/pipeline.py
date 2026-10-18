@@ -10,6 +10,9 @@ All functions accept an ``args``-like object (anything with the expected attribu
 from __future__ import annotations
 
 import os
+import json
+from copy import copy
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
@@ -19,6 +22,7 @@ from Bio import SeqIO
 from ..logging_conf import get_logger, log_step
 from . import fasta_out, report, topology
 from .models import STANDARD_COLUMNS
+from .artifacts import staged_outputs, file_hash
 from .parsers import bepipred, conservancy, mhcii, netctl, others, papimed
 
 logger = get_logger("pipeline")
@@ -139,7 +143,9 @@ def consolidate_predictions(args) -> pd.DataFrame:
                 df = mhcii.MHCIIHTMLconverter(file)
                 MHCII_df_list.append(df)
             for indice in range(len(MHCII_df_list)):
-                df = mhcii.MHCIIAntigenEpitopes(MHCII_df_list[indice], specie[indice], protein[indice], args.mhla, args.mic)
+                fields = Path(MHCII_files[indice]).stem.split("_", 2)
+                reference_id = fields[2] if len(fields) > 2 else "-"
+                df = mhcii.MHCIIAntigenEpitopes(MHCII_df_list[indice], specie[indice], protein[indice], args.mhla, args.mic, reference_id)
                 step.detail("%s_%s: %d epitope(s)", protein[indice], specie[indice], len(df))
                 MHCII_df = pd.concat([MHCII_df, df])
             step.result(files=len(MHCII_files), **_counts(MHCII_df))
@@ -182,6 +188,27 @@ def consolidate_predictions(args) -> pd.DataFrame:
 
 
 def run_poa1(args) -> Poa1Result:
+    """Generate a complete batch before replacing any previous POA1 output."""
+    destination = Path(args.d)
+    managed = ["Analysis_report.txt", "Conservancy Analysis", "reference.fasta", "poa1_manifest.json"]
+    managed.extend(p.name for p in destination.glob("*_Epitopes.xlsx"))
+    with staged_outputs(destination, managed) as stage:
+        staged_args = copy(args)
+        staged_args.d = str(stage)
+        # The reference travels with this result, independently of later uploads.
+        reference = stage / "reference.fasta"
+        reference.write_bytes(Path(args.f).read_bytes())
+        staged_args.f = str(reference)
+        result = _run_poa1(staged_args)
+        (stage / "poa1_manifest.json").write_text(json.dumps({
+            "reference": reference.name, "reference_sha256": file_hash(reference),
+            "parameters": vars(args),
+        }, default=str, indent=2), encoding="utf-8")
+    return Poa1Result(result.predictions, str(destination / "Analysis_report.txt"),
+                      str(destination / "Conservancy Analysis"))
+
+
+def _run_poa1(args) -> Poa1Result:
     """
     Full POA1 stage: validate input, consolidate predictions, write the report and the
     per-species FASTA files for the Conservancy Analysis. (Former ``POA1_v1.0.main`` body.)

@@ -34,6 +34,7 @@ def _embed_html(html: str, height: int) -> None:
 from Bio import SeqIO
 
 from poa.core import structure_map
+from poa.core.artifacts import safe_child, staged_outputs
 from poa.core.parsers import conservancy as conservancy_parser
 from poa.gui import backend, viz
 from poa.gui.help_texts import HELP
@@ -85,7 +86,7 @@ st.set_page_config(page_title="POA — Pipeline de Otimização de Antígenos", 
 #: so a new run never inherits the previous one's file paths or results
 _ANALYSIS_KEYS = ("proteins_path", "ref_raw", "ref_uploads", "poa1_sources", "prepared_b2",
                   "poa1_result", "conservancy_ready", "comparison_sets", "poa2_result",
-                  "poa2_ran_with", "pdb_path")
+                  "poa2_ran_with", "pdb_path", "poa1_signature", "poa2_signature")
 
 
 def _init_state():
@@ -124,6 +125,8 @@ def _init_state():
     # the parameters 'poa2_result' was produced with, so a table left on screen after the form
     # changed can be told apart from the output of the values currently shown
     ss.setdefault("poa2_ran_with", None)
+    ss.setdefault("poa1_signature", None)
+    ss.setdefault("poa2_signature", None)
     return ss
 
 
@@ -137,6 +140,33 @@ def _collect_sources():
     if ss.prepared_b2:
         src.setdefault("b2", []).extend(pr.b2_json for pr in ss.prepared_b2)
     return src
+
+
+def _poa1_signature():
+    paths = [ss.proteins_path]
+    paths.extend(path for group in _collect_sources().values() for path in group)
+    return backend.input_fingerprint(paths, ss.params_poa1)
+
+
+def _clear_poa2():
+    ss.poa2_result = None
+    ss.poa2_ran_with = None
+    ss.poa2_signature = None
+
+
+def _invalidate_changed_inputs():
+    changed = False
+    if ss.poa1_signature is not None and ss.poa1_signature != _poa1_signature():
+        ss.poa1_result = None
+        ss.poa1_signature = None
+        ss.conservancy_ready = False
+        _clear_poa2()
+        changed = True
+    if ss.poa2_signature is not None and ss.poa2_signature != backend.input_fingerprint(
+            [ss.proteins_path, ctx.conservancy_csv_dir]):
+        _clear_poa2()
+        changed = True
+    return changed
 
 
 def _refresh_reference(allow_clear: bool = False):
@@ -155,7 +185,17 @@ def _refresh_reference(allow_clear: bool = False):
     if len(parts) == 1:
         ss.proteins_path = parts[0]
     else:
-        ss.proteins_path = backend.merge_fastas(parts, str(ctx.inputs_dir / "proteins_all.fasta"))
+        try:
+            ss.proteins_path = backend.merge_fastas(parts,
+                                                    str(ctx.inputs_dir / "proteins_all.fasta"))
+        except ValueError as exc:
+            # The merge refuses two records that claim the same ID with different sequences,
+            # rather than pick one. Uncaught, that refusal reached Streamlit as a traceback —
+            # and because the uploads live in session state, it came back on every rerun, so the
+            # step could not even be used to remove the offending file. The previous ``-f`` is
+            # kept: it is still the reference the earlier steps ran against.
+            st.error(f"Não consegui unir os FASTAs de proteínas: {exc}. Se dois arquivos trazem "
+                     f"o mesmo cabeçalho com sequências diferentes, remova ou renomeie um deles.")
     return ss.proteins_path
 
 
@@ -619,29 +659,84 @@ def _automate_antigenic():
             st.warning(f"{exc}\n\nUse o upload manual abaixo (plano B).")
 
 
+def _mhcii_targets(seqs):
+    """
+    Resolve every reference header into the fields its result file is written under.
+
+    Done *before* the first request, not inside the prediction loop: the batch is published
+    all-or-nothing, so a header rejected on the last of ten records used to cost nine round
+    trips to the IEDB whose results were then thrown away with the staged batch. The whole
+    contract is only honest if the input is refused before anything is spent on it.
+
+    Two fields are enough — ``Proteína_Espécie`` is the name step 2 asks for in the manual
+    upload and what POA1 reads with an empty ``ID_Sequence``. What cannot be accepted is a
+    header with no species at all: the old default of ``SP`` invented one.
+    """
+    targets, seen = [], set()
+    for rec_id, seq in seqs:
+        parts = str(rec_id).upper().split("_", 2)
+        if len(parts) < 2 or not all(parts):
+            raise ValueError(f"Referência sem espécie no cabeçalho: {rec_id}; "
+                             f"use Proteína_Espécie[_ID].")
+        name = "_".join(parts)
+        if name in seen:
+            raise ValueError(f"Referência duplicada: {rec_id}; cada Proteína_Espécie[_ID] "
+                             f"precisa ser único — um sobrescreveria o resultado do outro.")
+        seen.add(name)
+        reference_id = parts[2] if len(parts) > 2 else ""
+        # Validates the very name ``write_result_file`` will build, which is the other way this
+        # loop could raise after the network had already been used.
+        safe_child(ctx.mhcii_dir, f"{name}.html")
+        targets.append((rec_id, seq, parts[0], parts[1], reference_id))
+    return targets
+
+
+def _mhcii_managed_names():
+    """
+    Top-level entries of the MHC-II folder that POA1 would consolidate as predictions.
+
+    The staging wrapper replaces the names it is given, so this has to match what the reader
+    sees, not what is convenient to list: ``files_map_MHCIIBD`` walks subdirectories and matches
+    ``.html`` without regard to case. Listing only ``*.html`` at the top level left
+    ``sub/OLD_SP.html`` and ``OLD_SP.HTML`` in place, to be read alongside the new batch.
+    """
+    if not ctx.mhcii_dir.is_dir():
+        return []
+    managed = []
+    for entry in sorted(ctx.mhcii_dir.iterdir()):
+        if entry.name.startswith(".poa_"):          # the stage and the archive, not predictions
+            continue
+        if entry.is_file() and entry.suffix.lower() == ".html":
+            managed.append(entry.name)
+        elif entry.is_dir() and any(p.suffix.lower() == ".html" for p in entry.rglob("*")):
+            managed.append(entry.name)
+    return managed
+
+
 def _automate_mhcii(alleles: str, length: int):
     seqs = _read_proteins()
     if not seqs:
         st.warning("Carregue o FASTA de proteínas primeiro.")
         return
-    ok, fail = 0, 0
+    try:
+        targets = _mhcii_targets(seqs)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    _clear_poa2()
     with st.status("Consultando a API do IEDB (MHC-II) por proteína…", expanded=True) as status:
-        for rec_id, seq in seqs:
-            parts = rec_id.upper().split("_")
-            protein = parts[0] if parts else rec_id.upper()
-            specie = parts[1] if len(parts) > 1 else "SP"
-            try:
-                res = mhcii_client.predict(seq, alleles, length=length, cache=ctx.cache())
-                mhcii_client.write_result_file(res.content, protein, specie, str(ctx.mhcii_dir))
-                st.write(f"• {protein}_{specie}: ok ({res.source})")
-                ok += 1
-            except (ServiceUnavailable, ServiceError) as exc:
-                st.write(f"• {protein}_{specie}: falhou — {exc}")
-                fail += 1
-        if ok:
+        try:
+            with staged_outputs(ctx.mhcii_dir, _mhcii_managed_names()) as stage:
+                for rec_id, seq, protein, specie, reference_id in targets:
+                    res = mhcii_client.predict(seq, alleles, length=length, cache=ctx.cache())
+                    mhcii_client.write_result_file(res.content, protein, specie, str(stage),
+                                                   reference_id=reference_id)
+                    st.write(f"• {rec_id}: ok ({res.source})")
             ss.poa1_sources["m"] = [str(ctx.mhcii_dir)]
-        state = "complete" if fail == 0 else ("error" if ok == 0 else "running")
-        status.update(label=f"MHC-II: {ok} ok, {fail} falha(s).", state=state)
+            status.update(label=f"MHC-II: {len(seqs)} referência(s) concluída(s).", state="complete")
+        except (ServiceUnavailable, ServiceError, ValueError, OSError) as exc:
+            status.update(label="MHC-II falhou; o lote anterior foi preservado.", state="error")
+            st.error(str(exc))
 
 
 def _import_bepipred2_original():
@@ -883,6 +978,10 @@ def step_poa1():
     st.caption(f"Referência (-f): {len(ref_species)} espécie(s) — " +
                (", ".join(ref_species) or "nenhuma identificada"))
     if st.button("▶️ Executar POA1", type="primary"):
+        ss.poa1_result = None
+        ss.poa1_signature = None
+        ss.conservancy_ready = False
+        _clear_poa2()
         with st.status("Executando POA1…", expanded=True) as status:
             try:
                 files = backend.consolidate_sources(sources, ctx.inputs_dir)
@@ -891,6 +990,7 @@ def step_poa1():
                     st.write(f"• {key}: {Path(path).name}" + (f" ({n} arquivos unidos)" if n > 1 else ""))
                 result = backend.run_poa1(ctx, files, ss.params_poa1, ss.proteins_path)
                 ss.poa1_result = result
+                ss.poa1_signature = _poa1_signature()
                 ss.conservancy_ready = False
                 status.update(label="POA1 concluído.", state="complete")
             except Exception as exc:
@@ -951,7 +1051,11 @@ def _declare_uploaded_threshold():
     header, so they are read from there when present and only asked for when they are not.
     """
     csv_dir = str(ctx.conservancy_csv_dir)
-    source = conservancy_parser.inspect_directory(csv_dir)
+    try:
+        source = conservancy_parser.inspect_directory(csv_dir)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
 
     if source.origin == "meta":
         st.success(f"Registrado: limiar **{conservancy_parser.format_threshold(source.threshold)}%**, "
@@ -1060,6 +1164,8 @@ def step_conservancy():
                            "diversidade (ex.: o *world set* da espécie).")
 
         if st.button("▶️ Calcular conservância (local)", type="primary"):
+            ss.conservancy_ready = False
+            _clear_poa2()
             with st.status("Calculando conservância…", expanded=True) as status:
                 try:
                     written = conservancy_client.run_conservancy_for_dir(
@@ -1080,12 +1186,20 @@ def step_conservancy():
                                accept_multiple_files=True, key="cons_csvs",
                                help=HELP["cons_csv_upload"])
         if ups:
-            # Any metadata already here describes the CSVs being replaced, not these.
-            stale = ctx.conservancy_csv_dir / conservancy_parser.METADATA_FILENAME
-            if stale.exists():
-                stale.unlink()
-            for up in ups:
-                backend.save_upload(ctx.conservancy_csv_dir, up.name, up.getvalue())
+            previous = conservancy_parser.map_EpConservFiles(str(ctx.conservancy_csv_dir))
+            managed = {Path(p).relative_to(ctx.conservancy_csv_dir).parts[0] for p in previous}
+            managed.add(conservancy_parser.METADATA_FILENAME)
+            with staged_outputs(ctx.conservancy_csv_dir, managed) as stage:
+                for up in ups:
+                    backend.save_upload(stage, up.name, up.getvalue())
+                current = {p.name: p.read_bytes() for p in stage.glob("*.csv")}
+                old = {Path(p).relative_to(ctx.conservancy_csv_dir).as_posix(): Path(p).read_bytes()
+                       for p in previous}
+                meta = ctx.conservancy_csv_dir / conservancy_parser.METADATA_FILENAME
+                if current == old and meta.exists():
+                    (stage / meta.name).write_bytes(meta.read_bytes())
+                else:
+                    _clear_poa2()
             ss.conservancy_ready = True
             st.success(f"{len(ups)} CSV(s) carregado(s).")
 
@@ -1172,7 +1286,12 @@ def _resume_from_results():
         # Adopt the threshold/operator the CSVs were produced with. Resuming used to leave both at
         # their initial defaults (70 and '>='), which are not a value anyone chose: in a session
         # that never ran step 4, step 5's fallback then applied 70 to data built at something else.
-        resumed = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
+        try:
+            resumed = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
+        except ValueError as exc:
+            ss.conservancy_ready = False
+            st.error(str(exc))
+            return
         if resumed.threshold is not None:
             ss.threshold = int(resumed.threshold)
         if resumed.operator:
@@ -1201,7 +1320,12 @@ def step_poa2():
 
     # The threshold POA2 applies comes from the data, not from the form: it used to only rename a
     # column, so a run could report "conservados ≥70%" while filtering CSVs computed at ≤100%.
-    source = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
+    try:
+        source = conservancy_parser.inspect_directory(str(ctx.conservancy_csv_dir))
+    except ValueError as exc:
+        _clear_poa2()
+        st.error(str(exc))
+        return
     if source.origin == "unknown":
         # Nothing in the directory declares the threshold, so it has to come from the user. This
         # used to read ss.threshold silently, which is only the value chosen in step 4 when step 4
@@ -1362,6 +1486,7 @@ def step_poa2():
             try:
                 ss.poa2_result = backend.run_poa2(ctx, params, ss.proteins_path)
                 ss.poa2_ran_with = dict(params)
+                ss.poa2_signature = backend.input_fingerprint([ss.proteins_path, ctx.conservancy_csv_dir])
                 status.update(label="POA2 concluído.", state="complete")
             except Exception as exc:
                 status.update(label="POA2 falhou.", state="error")
@@ -1425,6 +1550,16 @@ def step_viz():
         return
     df = ss.poa1_result.predictions
 
+    if df.empty:
+        st.info("Nenhum epítopo selecionado para visualizar.")
+        if ss.pdb_path and Path(ss.pdb_path).is_file():
+            try:
+                html = viz.build_3dmol_view_html(Path(ss.pdb_path).read_text(encoding="utf-8"), [])
+                _embed_html(html, height=520)
+            except Exception as exc:
+                st.error(f"Não foi possível renderizar a estrutura: {exc}")
+        return
+
     # --- 2D epitope map (no structure required) ---
     st.subheader("Mapa 2D de epítopos")
     st.caption("Cada segmento é um epítopo ao longo da sequência; uma trilha por proteína/espécie, "
@@ -1477,17 +1612,29 @@ def step_viz():
         # nothing on sight, and an unrelated structure produces a confident, meaningless figure.
         _show_structure_identity(pdb_text, Path(ss.pdb_path).name)
 
-        reference = backend.reference_sequence(ctx, prot, spec)
+        reference, refused = None, None
+        try:
+            reference = backend.reference_sequence(ctx, prot, spec, ss.proteins_path)
+        except (ValueError, OSError, KeyError) as exc:
+            refused = str(exc)
         report = None
-        if reference is None:
+        if refused is not None:
+            # Refused is not missing. The reference *was* found — in `poa1_out/`, or in several
+            # conflicting copies — and rejected, so sending the user to look for it in `inputs/`
+            # named the wrong folder and the wrong remedy right under the real explanation.
+            st.warning(f"{refused} A estrutura será exibida sem destaque de epítopos.")
+            ranges = []
+        elif reference is None:
             st.warning(
                 f"Não encontrei em `{ctx.inputs_dir.name}/` a sequência de referência de "
                 f"`{prot}_{spec}`, então não dá para conferir se esta estrutura é dessa proteína. "
-                f"Os epítopos serão destacados pelas posições cruas — confira a numeração.")
+                f"A estrutura será exibida sem destaque de epítopos.")
+            ranges = []
         else:
             report = structure_map.map_epitopes(pdb_text, reference["sequence"], ranges,
                                                 chain=chain or None)
             ranges = report.ranges
+            chain = report.chain
 
         try:
             if report is not None and not report.ok:
@@ -1550,4 +1697,7 @@ _DISPATCH = {
     STEPS[5]: step_results,
     STEPS[6]: step_viz,
 }
+_invalidate_changed_inputs()
 _DISPATCH[step]()
+if _invalidate_changed_inputs():
+    st.rerun()

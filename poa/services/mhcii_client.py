@@ -16,6 +16,7 @@ import os
 from typing import List, Optional, Sequence
 
 from ..logging_conf import get_logger, log_step
+from ..core.artifacts import safe_child
 from .base import Cache, ServiceError, ServiceResult, ServiceUnavailable, cached_call
 
 logger = get_logger("mhcii")
@@ -111,11 +112,13 @@ def normalize_tsv(tsv_text: str, requested_method: str = "nn_align") -> str:
 
 
 def write_result_file(tsv_text: str, protein: str, specie: str, out_dir: str,
-                      normalize: bool = True, requested_method: str = "nn_align") -> str:
+                      normalize: bool = True, requested_method: str = "nn_align",
+                      reference_id: str = "") -> str:
     """Write the (normalized) TSV as ``<Protein>_<Specie>.html`` for the directory-based parser."""
     os.makedirs(out_dir, exist_ok=True)
     content = normalize_tsv(tsv_text, requested_method) if normalize else tsv_text
-    path = os.path.join(out_dir, f"{protein}_{specie}.html")
+    suffix = f"_{reference_id}" if reference_id else ""
+    path = str(safe_child(out_dir, f"{protein}_{specie}{suffix}.html"))
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
     return path
