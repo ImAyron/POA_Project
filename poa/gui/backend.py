@@ -440,6 +440,11 @@ def record_input(ctx: "WorkContext", path, *, role: str, method: str = "", speci
     and from WSL, where its absolute path is different, and an absolute path recorded on one side
     would be meaningless on the other.
 
+    Recording the same file as the same thing again writes nothing. Some of the save sites sit in
+    code Streamlit reruns on every interaction — the merged ``-f`` is rebuilt whenever step 1
+    renders — and rewriting the file there would churn ``recorded_at`` on every click of an
+    analysis where nothing arrived.
+
     Failure to write the history never interrupts the run — the file itself is already saved, and
     losing a line of provenance is worth less than losing the upload.
     """
@@ -449,9 +454,13 @@ def record_input(ctx: "WorkContext", path, *, role: str, method: str = "", speci
         "method": method,
         "specie": specie,
         "original_name": original_name or Path(path).name,
-        "recorded_at": datetime.now().isoformat(timespec="seconds"),
     }
-    history = [item for item in read_input_history(ctx) if item.get("path") != entry["path"]]
+    history = read_input_history(ctx)
+    previous = next((item for item in history if item.get("path") == entry["path"]), None)
+    if previous is not None and all(previous.get(k) == v for k, v in entry.items()):
+        return
+    entry["recorded_at"] = datetime.now().isoformat(timespec="seconds")
+    history = [item for item in history if item.get("path") != entry["path"]]
     history.append(entry)
     target = ctx.root / INPUT_HISTORY_FILENAME
     try:
@@ -483,40 +492,168 @@ def _relative_to_run(ctx: "WorkContext", path) -> str:
         return str(path)
 
 
-#: How a file in ``inputs/`` is classified when the analysis predates the history file. Matched in
-#: order against the name, first hit wins. This is a fallback, not the contract: the names come
-#: from the save sites in ``app.py``, and an analysis recorded by :func:`record_input` is read back
-#: from that record instead. It exists because analyses already on disk have no history to read.
+# --------------------------------------------------------------------------- step state
+#: Written in the analysis folder beside the input history: what each step *held* when it was last
+#: rendered — which files it had selected and which numbers were in its form.
+STEP_STATE_FILENAME = "step_state.json"
+
+
+def record_step_state(ctx: "WorkContext", **fields) -> None:
+    """
+    Record what a step currently holds, replacing the fields given and leaving the rest.
+
+    :func:`record_input` answers a different question: it records that a file *arrived*, and that
+    is a fact about the file which never stops being true. Several steps, though, hold a
+    *selection* rather than a growing pile — step 2's uploaders replace the list for their method,
+    BepiPred-2.0 and 3.0 evict each other because they are the same B-cell method, and "Limpar
+    espécies importadas" drops the adapted imports with no file arriving at all. None of those
+    choices leave a trace in a log of arrivals, so an analysis rebuilt from arrivals alone hands
+    POA1 every file that ever passed through step 2 instead of the ones the person settled on.
+
+    The form parameters are here for the same reason: a reopened analysis that offers back the
+    MHC-II alleles' default while showing the HTML files produced with other alleles invites
+    re-running the step with inputs that do not match what is on screen.
+
+    Paths are stored relative to the analysis folder, as in :func:`record_input`, because the same
+    folder is opened from Windows and from WSL. Writing fails silently for the same reason too:
+    the files are already saved, and a lost preference is worth less than a broken step.
+    """
+    state = read_step_state(ctx)
+    merged = dict(state)
+    for key, value in fields.items():
+        merged[key] = _relativise(ctx, value)
+    if merged == state:
+        return
+    try:
+        (ctx.root / STEP_STATE_FILENAME).write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("%s gui/history | could not record the step state in %s: %s",
+                       TAG_WARN, STEP_STATE_FILENAME, exc)
+
+
+def _relativise(ctx: "WorkContext", value):
+    """
+    Rewrite any path inside a recorded value as relative to the analysis folder.
+
+    No ``isabs`` guard: ``POA_RESULTS_DIR`` is a documented user override and may be relative, and
+    then the paths handed to this function are relative to the *working directory*, not to the
+    analysis folder. Skipping them left the step state holding a CWD-relative path that
+    ``_apply_step_state`` resolved as ``ctx.root / p``, duplicating the prefix — the selection was
+    then dropped as missing and the step reopened empty with its file still on disk.
+
+    Sending every string through :func:`_relative_to_run` is safe because it resolves both sides
+    and returns the string untouched when it does not land inside the analysis folder, which is
+    what happens to the form values recorded alongside the paths.
+    """
+    if isinstance(value, str):
+        return _relative_to_run(ctx, value)
+    if isinstance(value, dict):
+        return {k: _relativise(ctx, v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_relativise(ctx, v) for v in value]
+    return value
+
+
+def read_step_state(ctx: "WorkContext") -> Dict[str, object]:
+    """What each step held when it was last rendered; ``{}`` when nothing was recorded."""
+    target = ctx.root / STEP_STATE_FILENAME
+    if not target.is_file():
+        return {}
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("%s gui/history | ignoring an unreadable %s: %s",
+                       TAG_WARN, STEP_STATE_FILENAME, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+#: How a file in ``inputs/`` is classified when nothing recorded where it came from. Matched in
+#: order against the name, first hit wins. Each entry is the *stem* a save site in ``app.py``
+#: writes ahead of the name the user gave; the separator is added at match time, so a stem never
+#: matches the middle of a word. Both separators occur: '_' where the save site prefixes a name
+#: the person chose ('ref_0_minhas.fasta'), '.' where it writes the whole name itself
+#: ('bepipred3.fasta', from the automated run). This is a fallback, not the contract: a file
+#: recorded by :func:`record_input` is read back from that record instead. It exists because files
+#: already on disk have no history to read.
 _LEGACY_INPUT_PATTERNS: Tuple[Tuple[str, str, str], ...] = (
-    # (prefix, role, method)
+    # (stem written by app.py, role, method)
     ("proteins_all", "merged_reference", ""),
     ("proteins_normalized", "merged_reference", ""),
-    ("ref_", "reference", ""),
-    ("comparison_", "comparison_set", ""),
-    ("structure_", "structure", ""),
+    ("ref", "reference", ""),
+    ("comparison", "comparison_set", ""),
+    ("structure", "structure", ""),
     ("bepipred3", "prediction", "b3"),
     ("pap", "prediction", "p"),
     ("netctl", "prediction", "n"),
     ("others", "prediction", "x"),
-    ("raw_", "bepipred2_raw", ""),
+    ("raw", "bepipred2_raw", ""),
+)
+
+#: The two files the adapter (:func:`poa.services.realdata_import.prepare_bepipred2`) writes. It
+#: names both ``<stem><suffix>`` where the stem is ``'-'.join(species)`` — the species tokens
+#: somebody typed into the step-2 mapping form.
+_ADAPTER_SUFFIXES: Tuple[Tuple[str, str, str], ...] = (
+    ("_b2.json", "bepipred2_adapted", "b2"),
+    ("_ref.fasta", "bepipred2_reference", ""),
 )
 
 
 def _classify_legacy_input(name: str) -> Tuple[str, str]:
-    """``(role, method)`` for a file in ``inputs/`` of an analysis with no recorded history."""
+    """``(role, method)`` for a file in ``inputs/`` whose arrival was never recorded."""
     lowered = name.lower()
-    if lowered.endswith("_b2.json"):
-        return "bepipred2_adapted", "b2"
-    if lowered.endswith("_ref.fasta"):
-        return "bepipred2_reference", ""
-    for prefix, role, method in _LEGACY_INPUT_PATTERNS:
-        if lowered.startswith(prefix):
+    # Both accounts can claim the same name, and which one is right is decided by what sits in
+    # front of the suffix. A save site writes '<stem>_<a name the person chose>', and that name
+    # may itself end in '_ref' — 'ref_0_E_DENV1_ref.fasta' is the step-1 upload the help text
+    # suggests, not a rebuilt reference. The adapter's stem is a species token, so it carries no
+    # '_' of its own: that absence is what separates 'DENV1_ref.fasta' from 'ref_0_E_DENV1_ref.
+    # fasta', and it is also why 'PAP_b2.json' is the adapter's and not an antigenicity upload.
+    for suffix, role, method in _ADAPTER_SUFFIXES:
+        if lowered.endswith(suffix) and "_" not in lowered[: -len(suffix)]:
+            return role, method
+    for stem, role, method in _LEGACY_INPUT_PATTERNS:
+        if lowered.startswith((f"{stem}_", f"{stem}.")):
             return role, method
     # POA0 writes '<PROT>_<SPECIE>.fasta' with no prefix of its own, and a hand-named reference
     # looks the same; both are references, which is the only role an unprefixed FASTA has here.
     if lowered.endswith((".fasta", ".fa", ".faa")):
         return "reference", ""
     return "", ""
+
+
+def _is_assembled_input(name: str) -> bool:
+    """
+    True for a file :func:`consolidate_sources` assembles out of the inputs of one method.
+
+    Nobody supplies these: they are the single file per method POA1 takes, rebuilt from the
+    per-species parts on every run. Their names carry the same stem as the parts
+    (``bepipred3_merged.fasta`` next to ``bepipred3_0_a.fasta``), so classifying one by name would
+    offer POA1 the parts *and* their merge, counting every epitope in them twice. The names are
+    read from the table that writes them, so the two cannot drift apart.
+    """
+    return name in {merged for _, merged in _MERGERS.values()}
+
+
+def _usable_as_b2(path: Path) -> bool:
+    """
+    Whether a raw BepiPred-2.0 export is the ``-b2`` input itself, with no adapter in between.
+
+    Step 2 asks this of every upload: keys already in ``Protein_Specie_ID`` are used as they are,
+    generic ones (``Sequence``, ``denv1``) have to be mapped first and it is the adapter's output
+    that the analysis then uses. The answer is a property of the file, not of the session, so a
+    reopened analysis asks it again instead of trusting a recorded verdict — which is also what
+    reaches the files that were on disk before any provenance was recorded.
+
+    Handing an unmapped file back would be worse than handing nothing: POA1 resolves no species
+    from it and every epitope lands under ``nan``.
+    """
+    try:
+        return bool(antigen_keys(str(path))) and not nonconforming_antigen_keys(str(path))
+    except Exception as exc:  # noqa: BLE001 - a malformed file must not break the reopening
+        logger.warning("%s gui/history | %s: unreadable as BepiPred-2.0, so step 2 will ask for "
+                       "it again: %s", TAG_WARN, path.name, exc)
+        return False
 
 
 @dataclass
@@ -531,13 +668,21 @@ class RestoredAnalysis:
     structure: Optional[str] = None                           # step 7
     conservancy_csvs: List[str] = field(default_factory=list)  # step 4
     poa1_result: Optional[object] = None                      # step 3
-    source: str = "none"                                      # 'history' | 'inferred' | 'none'
+    poa2_result: Optional[object] = None                      # step 5, shown by step 6
+    ref_swap: bool = False                                    # step 1, headers were Specie_Protein
+    params: Dict[str, object] = field(default_factory=dict)   # the forms, by step
+    source: str = "none"              # 'history' | 'inferred' | 'mixed' (both accounts) | 'none'
 
     @property
     def anything(self) -> bool:
+        # Whatever summary() announces has to count here, because _restore_analysis_files gives up
+        # when this is false: a folder whose only surviving artefact is a POA1 or POA2 result would
+        # otherwise produce a summary nobody gets to see, and step 6 would keep saying POA2 never
+        # ran — the exact case poa2_result_from_disk exists to cover, when the inputs are gone.
         return bool(self.references or self.merged_reference or self.prediction_files
                     or self.prepared_b2 or self.comparison_sets or self.structure
-                    or self.conservancy_csvs)
+                    or self.conservancy_csvs
+                    or self.poa1_result is not None or self.poa2_result is not None)
 
     def summary(self) -> List[str]:
         """Human lines describing what was restored, for the interface to show."""
@@ -550,6 +695,9 @@ class RestoredAnalysis:
             lines.append(f"Etapa 2 (b2): {len(self.prepared_b2)} JSON(s) adaptado(s)")
         if self.poa1_result is not None:
             lines.append(f"Etapa 3: {len(self.poa1_result.predictions)} epítopo(s)")
+        if self.poa2_result is not None:
+            lines.append(f"Etapa 5: {len(self.poa2_result.results)} epítopo(s) selecionado(s) "
+                         f"({self.poa2_result.type_symbol})")
         if self.comparison_sets:
             lines.append("Etapa 4: conjunto de comparação de "
                          + ", ".join(sorted(self.comparison_sets)))
@@ -569,47 +717,84 @@ def restore_analysis(ctx: "WorkContext") -> RestoredAnalysis:
     per-species comparison sets of step 4, the structure of step 7 — stayed on disk while the
     interface showed empty fields, so continuing a run meant uploading it all again.
 
-    The provenance recorded by :func:`record_input` is the source of truth. An analysis created
-    before that record existed is classified by name instead (:func:`_classify_legacy_input`),
-    which is best-effort: it is why the result carries ``source``.
+    Three accounts are read, in decreasing order of authority.
+
+    :func:`record_step_state` is first where it speaks, because it is the only one that records a
+    *choice*. Step 1 and step 2 replace what they hold rather than add to it, and the two BepiPred
+    versions evict each other, so a step rebuilt from arrivals alone offers POA1 every file that
+    ever passed through it — the JSON the person replaced, the BepiPred-2.0 import the automated
+    3.0 run discarded — merged with the ones they settled on.
+
+    :func:`record_input` is next: it says which step each file arrived at, which is what no file
+    name can be trusted to say. Last comes the name (:func:`_classify_legacy_input`), best-effort,
+    for files that were on disk before any of this was recorded; it only fills what the records
+    leave empty, and ``source`` reports whenever it was used so the interface can ask for a check.
     """
     restored = RestoredAnalysis()
     history = read_input_history(ctx)
-    restored.source = "history" if history else "inferred"
+    state = read_step_state(ctx)
+    recorded = {item["path"] for item in history}
 
-    if history:
-        classified = [(ctx.root / item["path"], item.get("role", ""), item.get("method", ""),
-                       item.get("specie", "")) for item in history]
-    else:
-        classified = []
-        for path in sorted(ctx.inputs_dir.glob("*")) if ctx.inputs_dir.is_dir() else []:
-            if path.is_file():
-                role, method = _classify_legacy_input(path.name)
-                classified.append((path, role, method, ""))
+    inferred = []
+    for path in sorted(ctx.inputs_dir.glob("*")) if ctx.inputs_dir.is_dir() else []:
+        if not path.is_file() or _relative_to_run(ctx, path) in recorded:
+            continue
+        if _is_assembled_input(path.name):
+            continue
+        role, method = _classify_legacy_input(path.name)
+        if role:
+            inferred.append((path, role, method, ""))
+
+    recorded_entries = [(ctx.root / item["path"], item.get("role", ""), item.get("method", ""),
+                         item.get("specie", "")) for item in history]
+    restored.source = ("mixed" if inferred and history
+                       else "inferred" if inferred or not history
+                       else "history")
 
     adapted: Dict[str, Path] = {}
-    for path, role, method, specie in classified:
-        if not path.is_file():
-            continue            # the file was deleted after being recorded
-        text = str(path)
-        if role == "reference":
-            restored.references.append(text)
-        elif role == "merged_reference":
-            restored.merged_reference = text
-        elif role == "prediction" and method == "m":
-            # MHC-II is the one method POA1 takes as a *directory* of Protein_Specie.html files.
-            # Each file is recorded on its own — that is the provenance — but the input the step
-            # has to offer back is the folder, so the individual paths are not what is restored.
-            pass
-        elif role == "prediction" and method:
-            restored.prediction_files.setdefault(method, []).append(text)
-        elif role == "comparison_set":
-            key = specie or path.stem.replace("comparison_", "").upper()
-            restored.comparison_sets[key] = text
-        elif role == "structure":
-            restored.structure = text
-        elif role == "bepipred2_adapted":
-            adapted[path.name[: -len("_b2.json")]] = path
+
+    def absorb(entries, *, authoritative: bool) -> None:
+        """
+        Place each file on its step. Guessed files fill only what the record left empty.
+
+        Within the record the later entry wins — it is chronological, and the second structure
+        somebody uploads is the one the analysis used. A guess never displaces a record, in a
+        single slot or at the head of a list: ``merge_fastas`` keeps the first record of each
+        header, so a stale legacy FASTA arriving first would hand POA1 the sequence the person
+        reopened the analysis to replace.
+        """
+        for path, role, method, specie in entries:
+            if not path.is_file():
+                continue            # the file was deleted after being recorded
+            text = str(path)
+            if role == "reference":
+                restored.references.append(text)
+            elif role == "merged_reference":
+                if authoritative or restored.merged_reference is None:
+                    restored.merged_reference = text
+            elif role == "prediction" and method == "m":
+                # MHC-II is the one method POA1 takes as a *directory* of Protein_Specie.html
+                # files. Each file is recorded on its own — that is the provenance — but the input
+                # the step has to offer back is the folder, not the individual paths.
+                pass
+            elif role == "prediction" and method:
+                restored.prediction_files.setdefault(method, []).append(text)
+            elif role == "comparison_set":
+                key = specie or path.stem.replace("comparison_", "").upper()
+                if authoritative or key not in restored.comparison_sets:
+                    restored.comparison_sets[key] = text
+            elif role == "structure":
+                if authoritative or restored.structure is None:
+                    restored.structure = text
+            elif role == "bepipred2_adapted":
+                adapted.setdefault(path.name[: -len("_b2.json")], path)
+            elif role == "bepipred2_raw" and _usable_as_b2(path):
+                # A raw export whose keys already conform is the -b2 input itself: step 2 skips
+                # the adapter and uses this very file, so this is the only record of it there is.
+                restored.prediction_files.setdefault("b2", []).append(text)
+
+    absorb(recorded_entries, authoritative=True)
+    absorb(inferred, authoritative=False)
 
     # The adapter's two files are one record: pair them back up by their shared stem.
     for stem, b2_path in sorted(adapted.items()):
@@ -622,11 +807,52 @@ def restore_analysis(ctx: "WorkContext") -> RestoredAnalysis:
     if ctx.mhcii_dir.is_dir() and any(ctx.mhcii_dir.glob("*.htm*")):
         restored.prediction_files.setdefault("m", [str(ctx.mhcii_dir)])
 
+    _apply_step_state(ctx, restored, state)
+
     if ctx.conservancy_csv_dir.is_dir():
         restored.conservancy_csvs = [str(p) for p in sorted(ctx.conservancy_csv_dir.glob("*.csv"))]
 
     restored.poa1_result = poa1_result_from_disk(ctx)
+    restored.poa2_result = poa2_result_from_disk(ctx)
     return restored
+
+
+def _apply_step_state(ctx: "WorkContext", restored: RestoredAnalysis,
+                      state: Dict[str, object]) -> None:
+    """
+    Narrow what the files account for down to what the steps had actually selected.
+
+    Only the fields that were recorded are applied: an analysis whose step state predates this —
+    or that never rendered the step — keeps everything the files gave it, which is the best that
+    can be said about it. A file the selection names but that is gone from disk is dropped, same
+    as anywhere else in the restore.
+    """
+    def present(values) -> List[str]:
+        paths = [str(ctx.root / p) for p in values if isinstance(p, str)]
+        return [p for p in paths if Path(p).is_file()]
+
+    if isinstance(state.get("references"), list):
+        restored.references = present(state["references"])
+    if isinstance(state.get("sources"), dict):
+        selected: Dict[str, List[str]] = {}
+        for method, values in state["sources"].items():
+            if method == "m":
+                continue
+            files = present(values if isinstance(values, list) else [])
+            if files:
+                selected[method] = files
+        # MHC-II is the folder itself, never a selection among files: the step hands POA1
+        # ``mhcii/`` whenever it holds anything at all, so what is on disk already is the answer.
+        if "m" in restored.prediction_files:
+            selected["m"] = restored.prediction_files["m"]
+        restored.prediction_files = selected
+    if isinstance(state.get("prepared_b2"), list):
+        restored.prepared_b2 = [pr for pr in restored.prepared_b2
+                                if _relative_to_run(ctx, pr.b2_json) in state["prepared_b2"]]
+    if isinstance(state.get("ref_swap"), bool):
+        restored.ref_swap = state["ref_swap"]
+    restored.params = {key: value for key, value in state.items()
+                       if key.startswith("params_") and isinstance(value, dict)}
 
 
 # --------------------------------------------------------------------------- multi-species merging
@@ -1027,10 +1253,25 @@ def import_bepipred2(ctx: WorkContext, filename: str, data: bytes,
     different species — a single BepiPred run over several organisms.
     Returns the :class:`~poa.services.realdata_import.Prepared` record (paths + ``has_x`` flag);
     the caller wires ``b2_json`` into the POA1 files and may adopt ``reference_fasta`` as ``-f``.
+
+    All three files this leaves in ``inputs/`` are recorded (:func:`record_input`). The adapter
+    writes its two itself, so nothing else would record them, and the name scan can read them
+    back — the pair is found by its shared stem either way. What the record buys is that they are
+    *accounted for*: without it, reopening the analysis meets two files it has to guess at, and an
+    analysis whose every file went through the interface is asked to check its steps for
+    guesswork that never happened.
     """
-    raw_path = save_upload(ctx.inputs_dir, filename, data)
-    return realdata_import.prepare_bepipred2(raw_path, specie, str(ctx.inputs_dir),
-                                             protein=protein, mapping=mapping)
+    raw_path = save_upload(ctx.inputs_dir, filename, data, ctx=ctx, role="bepipred2_raw",
+                           original_name=filename)
+    prepared = realdata_import.prepare_bepipred2(raw_path, specie, str(ctx.inputs_dir),
+                                                 protein=protein, mapping=mapping)
+    # The species token is the stem both files share, and what pairs them back up. The reference
+    # is recorded even though no branch of restore_analysis reads that role: it is there to say
+    # the file is spoken for, so the scan does not meet an unexplained FASTA in inputs/.
+    stem = "-".join(prepared.species)
+    record_input(ctx, prepared.b2_json, role="bepipred2_adapted", method="b2", specie=stem)
+    record_input(ctx, prepared.reference_fasta, role="bepipred2_reference", specie=stem)
+    return prepared
 
 
 def predictions_from_epitope_fastas(ctx: "WorkContext") -> pd.DataFrame:
@@ -1068,6 +1309,42 @@ def poa1_result_from_disk(ctx: "WorkContext") -> Optional[pipeline.Poa1Result]:
         predictions=predictions,
         report_path=str(ctx.poa1_out_dir / "Analysis_report.txt"),
         conservancy_dir=str(ctx.conservancy_epitopes_dir),
+    )
+
+
+def poa2_result_from_disk(ctx: "WorkContext") -> Optional[pipeline.Poa2Result]:
+    """
+    Reconstruct a :class:`~poa.core.pipeline.Poa2Result` from ``poa2_out/``; None if absent.
+
+    The counterpart of :func:`poa1_result_from_disk`, and missing for as long as that one existed
+    alone: reopening a finished analysis brought step 3 back but left step 6 saying the POA2 had
+    not been run, with the spreadsheet it is asking for sitting in the folder. Running it again to
+    read a file that is already there is the kind of work reopening exists to spare — and, with
+    the filter form restored from :func:`read_step_state` only since this change, a re-run could
+    quietly produce a *different* spreadsheet from the one lying beside it.
+
+    :func:`poa.core.pipeline.run_poa2` writes ``POA2_analysis_<ge|lt><threshold>.xlsx``, so the
+    name carries the criterion back; the optional ``-rf`` FASTA shares the stem.
+    """
+    if not ctx.poa2_out_dir.is_dir():
+        return None
+    sheets = sorted(ctx.poa2_out_dir.glob("POA2_analysis_*.xlsx"),
+                    key=lambda p: p.stat().st_mtime)
+    if not sheets:
+        return None
+    xlsx = sheets[-1]
+    try:
+        results = pd.read_excel(xlsx)
+    except Exception as exc:  # noqa: BLE001 - a reopened analysis must not fail on a stale file
+        logger.warning("%s gui/history | %s: could not be read back, so step 5 will ask for the "
+                       "POA2 to be run again: %s", TAG_WARN, xlsx.name, exc)
+        return None
+    fastas = sorted(ctx.poa2_out_dir.glob(f"{xlsx.stem}_rf*.fasta"))
+    return pipeline.Poa2Result(
+        results=results,
+        xlsx_path=str(xlsx),
+        fasta_path=str(fastas[0]) if fastas else None,
+        type_symbol=">=" if "_ge" in xlsx.stem else "<",
     )
 
 

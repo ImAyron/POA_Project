@@ -162,6 +162,12 @@ def _refresh_reference(allow_clear: bool = False):
         ss.proteins_path = parts[0]
     else:
         ss.proteins_path = backend.merge_fastas(parts, str(ctx.inputs_dir / "proteins_all.fasta"))
+        # The merge lands in inputs/ like an upload, but it arrives from here instead of from an
+        # uploader, so it is recorded here too. Otherwise reopening the analysis would meet a file
+        # with no provenance, fall back to its name, and warn about guesswork in an analysis whose
+        # record is in fact complete.
+        backend.record_input(ctx, ss.proteins_path, role="merged_reference",
+                             original_name="proteins_all.fasta")
     return ss.proteins_path
 
 
@@ -206,14 +212,24 @@ def _restore_analysis_files(context):
     if restored.references:
         ss.ref_raw = restored.references
         ss.ref_uploads = list(restored.references)
+    ss.ref_swap = restored.ref_swap
     ss.prepared_b2 = list(restored.prepared_b2)
     for method, files in restored.prediction_files.items():
         ss.poa1_sources.setdefault(method, list(files))
     ss.comparison_sets.update(restored.comparison_sets)
+    # The forms are state of the analysis as much as its files are: step 2's HTML files were
+    # produced with particular alleles and step 3's table with particular filters, and offering
+    # the files back beside the initial defaults invites re-running a step with inputs that do
+    # not match what is on screen — the silent form reversal the STATE POLICY above exists for,
+    # here across sessions instead of across steps.
+    for key, values in restored.params.items():
+        ss[key] = dict(values)
     if restored.structure:
         ss.pdb_path = restored.structure
     if restored.poa1_result is not None:
         ss.poa1_result = restored.poa1_result
+    if restored.poa2_result is not None:
+        ss.poa2_result = restored.poa2_result
     if restored.conservancy_csvs:
         ss.conservancy_ready = True
         # The threshold and operator belong to the CSVs, not to the form: read them back the same
@@ -225,12 +241,15 @@ def _restore_analysis_files(context):
             ss.cons_operator = (">=" if conservancy_parser.operator_family(source.operator) == "ge"
                                 else "<")
 
-    # _refresh_reference merges whatever is now in ref_uploads + prepared_b2 into the single -f.
-    # The recorded merge is only adopted when there is nothing to rebuild it from, so a reopened
-    # analysis ends up with the same -f the original session had.
-    _refresh_reference()
-    if not ss.proteins_path and restored.merged_reference:
+    # The -f the analysis actually ran with is adopted as it stands when one was recorded. It is
+    # not always rebuildable from the parts: with the swap box ticked, step 1's -f is
+    # proteins_normalized.fasta, and ref_uploads holds the raw files whose headers are still
+    # Specie_Protein — rebuilding from those hands POA1 a different set of species than the one
+    # the analysis was run on, without a word. Only when nothing was recorded is it merged here.
+    if restored.merged_reference:
         ss.proteins_path = restored.merged_reference
+    else:
+        _refresh_reference()
     ss.restored_summary = restored.summary()
     ss.restored_source = restored.source
 
@@ -408,6 +427,10 @@ with st.sidebar:
                 st.warning("Esta análise é anterior ao registro de procedência, então os arquivos "
                            "foram classificados pelo nome. Confira se cada um está na etapa certa; "
                            "a partir desta execução a origem passa a ser gravada.")
+            elif ss.restored_source == "mixed":
+                st.warning("Parte dos arquivos desta análise é anterior ao registro de "
+                           "procedência e foi classificada pelo nome; o resto tem origem "
+                           "gravada. Confira se cada um está na etapa certa.")
     st.divider()
     # Keyed so it shows up in session state and is therefore cleared by _full_reset — an unkeyed
     # radio keeps its selection internally, and "Nova análise" would land on whatever step the
@@ -592,6 +615,10 @@ def step_inputs():
         if swap:
             ss.ref_uploads = [backend.normalize_fasta_headers(
                 ss.ref_raw, str(ctx.inputs_dir / "proteins_normalized.fasta"), swap=True)]
+            # Written here rather than uploaded, so its provenance is recorded here — see the
+            # merge in _refresh_reference.
+            backend.record_input(ctx, ss.ref_uploads[0], role="merged_reference",
+                                 original_name="proteins_normalized.fasta")
         else:
             ss.ref_uploads = list(ss.ref_raw)
         st.success(f"{len(ss.ref_raw)} arquivo(s) de proteínas carregado(s).")
@@ -664,6 +691,11 @@ def step_inputs():
 
     ss.params_poa1 = dict(bmin=bmin, bmax=bmax, pmin=pmin, pmax=pmax, xmin=xmin, xmax=xmax,
                           mhla=mhla, mic=mic, e="y" if export else "n")
+    # Step 1 as it now stands, so reopening this analysis finds it rather than the defaults. The
+    # FASTA list is a *selection*: the uploader replaces ss.ref_raw rather than adding to it, and
+    # a correction uploaded over an earlier file must not come back beside the file it replaced.
+    backend.record_step_state(ctx, references=list(ss.ref_raw), ref_swap=bool(ss.ref_swap),
+                              params_poa1=dict(ss.params_poa1))
     if ss.proteins_path:
         st.success("Parâmetros salvos.")
     else:
@@ -946,6 +978,14 @@ def step_predictions():
 
     st.divider()
     sources = _collect_sources()
+    # Every choice this step offers is a replacement, not an addition: an uploader overwrites its
+    # method's list, BepiPred-2.0 and 3.0 evict each other because they are one B-cell method, and
+    # "Limpar espécies importadas" drops the adapted imports without any file arriving. Recorded
+    # here, at the one point that sees the whole step, because that is the only place the answer
+    # exists — and recorded even when it is empty, which is exactly what clearing produces.
+    backend.record_step_state(ctx, sources={k: list(v) for k, v in ss.poa1_sources.items() if v},
+                              prepared_b2=[pr.b2_json for pr in ss.prepared_b2],
+                              params_mhcii=dict(ss.params_mhcii))
     if not sources:
         st.warning("Nenhum resultado de predição ainda.")
         return
@@ -1392,6 +1432,9 @@ def step_poa2():
     params = dict(objective=objective, t=t_value, imin=imin, imax=imax, m=mmatch, rf=rf,
                   idf=identity_filter)
     ss.params_poa2 = dict(params)   # the form as it now stands, for the next time this step renders
+    # And on disk, for the next time the analysis is opened: these are the scientific parameters,
+    # and the spreadsheet in poa2_out/ is only interpretable beside the filters that produced it.
+    backend.record_step_state(ctx, params_poa2=dict(params))
 
     # Where the epitopes are lost, computed from the CSVs with the parameters currently on screen.
     # POA2 only ever reported the survivors, so an empty result could not be told from a bound set
