@@ -261,6 +261,22 @@ o arquivo em execuções de linha de comando).
 > os três é a forma mais comum de ler um resultado do POA2 como significando outra coisa. Os
 > textos ficam em `poa/gui/help_texts.py`, revisáveis como documentação, separados do layout.
 
+> **Novo: reabrir uma análise devolve os arquivos às suas etapas.** Antes, reabrir restaurava
+> apenas os CSVs de conservância e a referência, e atrás de um botão na etapa 5 — os arquivos de
+> predição enviados à mão na etapa 2, os conjuntos de comparação por espécie da etapa 4 e a
+> estrutura da etapa 7 ficavam no disco enquanto a interface mostrava campos vazios, então
+> continuar uma análise significava reenviar o que ela já continha. Agora tudo é carregado
+> automaticamente, cada arquivo na etapa de onde veio, e a barra lateral lista o que voltou.
+>
+> Isso funciona porque a **procedência é gravada na chegada**, num `input_history.json` dentro da
+> pasta da análise: o nome do arquivo não diz de que etapa ele veio — um FASTA de referência e um
+> de "outros preditores" são ambos FASTAs em `inputs/`, e um arquivo que você nomeou não segue
+> convenção nenhuma. Os caminhos são gravados **relativos à pasta da análise**, porque a mesma
+> pasta é aberta do Windows e da WSL, onde o caminho absoluto é outro.
+>
+> Análises criadas antes desse registro continuam sendo recarregadas, classificando os arquivos
+> pelo nome — a interface avisa quando foi esse o caminho, porque é melhor esforço e vale conferir.
+
 > **Novo: botão "Nova análise" na barra lateral.** Limpa todos os campos e resultados da sessão e
 > cria uma **pasta nova**, voltando à tela de nomear a análise. É o único caminho que zera os
 > formulários: "Trocar de análise" mantém os parâmetros de filtragem de propósito, porque o motivo

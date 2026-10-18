@@ -78,6 +78,47 @@ class Prepared:
         return seen or [self.specie]
 
 
+def prepared_from_disk(b2_json: str, reference_fasta: str) -> Optional[Prepared]:
+    """
+    Rebuild a :class:`Prepared` from the pair of files :func:`prepare_bepipred2` left behind.
+
+    Reopening an analysis has to put the adapted BepiPred-2.0 input back where step 2 expects it,
+    and the two files on disk already carry everything that record held: the antigen keys follow
+    ``Protein_Specie_ID`` by construction, and the rebuilt ``-f`` carries the sequences. Rebuilding
+    from them means a reopened analysis offers the same inputs as the session that created it,
+    instead of asking for the JSON again.
+
+    Returns ``None`` when either file is missing or the JSON cannot be read — a reopened analysis
+    must never fail on a file it only hoped to find.
+    """
+    if not (os.path.isfile(b2_json) and os.path.isfile(reference_fasta)):
+        return None
+    try:
+        keys = antigen_keys(b2_json)
+    except (OSError, ValueError, KeyError) as exc:
+        logger.warning("%s service/realdata-import | %s: could not be read back, so step 2 will "
+                       "ask for it again: %s", TAG_WARN, b2_json, exc)
+        return None
+    if not keys:
+        return None
+
+    sequences = {str(rec.id): str(rec.seq) for rec in SeqIO.parse(reference_fasta, "fasta")}
+    entries: List[AntigenEntry] = []
+    for key in keys:
+        parts = str(key).split("_")
+        protein = parts[0] if parts else ""
+        specie = parts[1] if len(parts) > 1 else ""
+        id_seq = "_".join(parts[2:]) if len(parts) > 2 else "ref"
+        entries.append(AntigenEntry(original_key=str(key), protein=protein, specie=specie,
+                                    id_seq=id_seq, sequence=sequences.get(str(key), "")))
+
+    first = entries[0]
+    joined = "".join(entry.sequence for entry in entries)
+    return Prepared(specie=first.specie, protein=first.protein, id_seq=first.id_seq,
+                    sequence=first.sequence, reference_fasta=reference_fasta, b2_json=b2_json,
+                    has_x="x" in joined.lower(), entries=entries)
+
+
 def antigen_keys(json_path: str) -> List[str]:
     """The antigen keys of a BepiPred-2.0 JSON, in file order (for building a mapping UI)."""
     with open(json_path, "r") as fh:

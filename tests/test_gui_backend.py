@@ -131,6 +131,26 @@ def test_import_bepipred2_adapts_upload(tmp_path):
     assert ref[0] == ">E_DENV1_ref" and ref[1] == "MRCVGIGN"
 
 
+def test_import_bepipred2_records_the_two_files_it_writes(tmp_path):
+    """
+    O adaptador escreve seus dois arquivos por fora do save_upload, então nada os registrava.
+
+    Reabrir a análise lê o registro em vez dos nomes no disco; sem essas linhas a etapa 2 voltava
+    vazia, pedindo de novo um JSON que a análise já tinha adaptado.
+    """
+    ctx = backend.WorkContext(tmp_path)
+    raw = json.dumps({"antigens": {"Sequence": {"AA": list("MRCVGIGN"),
+                                                "PRED": [0.1] * 8}}}).encode("utf-8")
+
+    backend.import_bepipred2(ctx, "bepipred_denv1.json", raw, "DENV1", protein="E")
+
+    roles = {item["path"]: item["role"] for item in backend.read_input_history(ctx)}
+    assert roles["inputs/DENV1_b2.json"] == "bepipred2_adapted"
+    assert roles["inputs/DENV1_ref.fasta"] == "bepipred2_reference"
+    # a cópia crua que a própria função salva também deixa de ficar órfã em inputs/
+    assert roles["inputs/bepipred_denv1.json"] == "bepipred2_raw"
+
+
 def test_predictions_summary():
     df = pd.DataFrame({
         "Method": ["Bepipred3.0", "Bepipred3.0", "NetCTL"],
