@@ -113,10 +113,19 @@ eram pintadas de vermelho sem erro algum. Hoje a interface começa dizendo o que
 (`L-FUCULOSE KINASE FUCK · STREPTOCOCCUS PNEUMONIAE`) e recusa o destaque a 25,0% e 30,0% de
 identidade.
 
+**A estrutura não precisa mais ser baixada à mão.** A etapa 7 tem um expansor *"Buscar a estrutura
+no RCSB"*: ele lê o accession do terceiro campo do cabeçalho da referência (`NS1_DENV1_P29990`),
+pergunta ao PDBe quais entradas do PDB cobrem essa proteína — ordenadas por cobertura e resolução
+— e baixa a que você escolher. Sem accession no cabeçalho, a etapa diz isso e o upload continua
+sendo o caminho; é o que acontece quando a referência não veio do POA0 nem do UniProt.
+
 Duas rotas resolvem a numeração, e a etapa 7 usa a que estiver disponível:
 
 * **Mapeamento SIFTS**, quando a estrutura tem referência cruzada ao UniProt — exato. O POA0 grava
-  o deslocamento no `POA0_relatorio.json` quando você baixa a estrutura com `--estrutura`.
+  o deslocamento no `POA0_relatorio.json` quando você baixa a estrutura com `--estrutura`, e a
+  etapa 7 o lê de volta. Vale só para a estrutura que o próprio POA0 baixou: o deslocamento é
+  relativo à região que ele escreveu, e aplicá-lo a outro arquivo colocaria os epítopos sobre os
+  resíduos errados com aparência de exatidão. A interface diz qual das duas rotas foi usada.
 * **Alinhamento** (`Bio.Align.PairwiseAligner`, BLOSUM62, extremidades livres), para estruturas
   enviadas à mão ou modelos preditos.
 
@@ -143,7 +152,7 @@ limiar) — de modo que um resultado vazio aponta qual filtro o esvaziou, em vez
 O funil é calculado só a partir dos CSVs, então aparece **mesmo sem o pyTMHMM**: no Windows dá
 para ajustar os parâmetros e só então passar para a WSL para executar.
 
-**Testes:** `python -m pytest` — 155 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
+**Testes:** `python -m pytest` — 513 testes cobrindo parsers, ranqueamento/filtros, conservação local, clientes
 de serviço, backend da interface, visualização e o adaptador dos dados reais. Como preparar o
 ambiente e conferir tudo à mão (inclusive um conjunto de exemplo em `exemplos/limiar/` em que o
 limiar de identidade comprovadamente muda o resultado): **[`COMO_TESTAR.md`](COMO_TESTAR.md)**.

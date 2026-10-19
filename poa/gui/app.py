@@ -103,6 +103,7 @@ def _init_state():
     ss.setdefault("params_mhcii", {})      # step 2: IEDB alleles and peptide length
     ss.setdefault("params_viz", {})        # step 7: 3D representation controls
     ss.setdefault("pdb_path", None)        # step 7: the uploaded structure, kept by path
+    ss.setdefault("viz_structures", [])    # step 7: PDB entries the RCSB search offered
     # Reopening an analysis loads its files back onto their own steps. The flag survives the
     # rerun that follows adoption, because the analysis context does not exist yet when the
     # button is clicked; the summary is kept so the sidebar can say what came back.
@@ -1722,6 +1723,8 @@ def step_viz():
                               help=HELP["viz_chain"])
     ss.params_viz = dict(track=choice, style=base_style, surface=surface, chain=chain)
 
+    _structure_source(choice)
+
     pdb_up = st.file_uploader("Arquivo .pdb", type=["pdb", "ent"], key="pdb_up",
                               help=HELP["viz_pdb"])
     if pdb_up is not None:
@@ -1762,10 +1765,22 @@ def step_viz():
                 f"A estrutura será exibida sem destaque de epítopos.")
             ranges = []
         else:
-            report = structure_map.map_epitopes(pdb_text, reference["sequence"], ranges,
-                                                chain=chain or None)
+            # SIFTS states the correspondence residue by residue; the alignment estimates it.
+            # When POA0 fetched this structure it already recorded the mapping, so use it — this
+            # is what step 1 has been promising, and what nothing read back until now.
+            mapping = backend.structure_mapping(ctx, ss.pdb_path)
+            report = structure_map.map_epitopes(
+                pdb_text, reference["sequence"], ranges, chain=chain or None,
+                sifts_offset=mapping["offset"] if mapping else None,
+                sifts_span=mapping["span"] if mapping else None)
             ranges = report.ranges
             chain = report.chain
+            if mapping:
+                st.caption(f"Numeração resolvida pelo mapeamento **SIFTS** de "
+                           f"`{mapping['pdb_id']}` (exato), e não por alinhamento.")
+                if not mapping["covers_region"]:
+                    st.warning("A estrutura não cobre toda a região analisada: parte dos epítopos "
+                               "não tem correspondência estrutural.")
 
         try:
             if report is not None and not report.ok:
@@ -1798,6 +1813,72 @@ def step_viz():
     else:
         st.info("Envie um arquivo .pdb para ver os epítopos destacados na estrutura 3D, "
                 "ou use o POA0 (`--estrutura 6H3X`) para baixar a estrutura certa do RCSB.")
+
+
+def _structure_source(track: str) -> None:
+    """
+    Offer the RCSB alongside the upload, so the structure does not have to be fetched by hand.
+
+    Everything needed already exists — ``list_structures`` asks PDBe which entries cover a
+    UniProt accession, ``fetch_structure`` downloads the file from RCSB — but only step 1's POA0
+    panel used it, and only while generating the reference. Someone who uploaded their own FASTA,
+    or who wants a different structure after the fact, had to go to the site and come back with a
+    file.
+
+    The accession comes from the reference's own header; without one this says so and leaves the
+    upload as the way in, rather than searching for something it cannot identify.
+    """
+    accession = backend.accession_from_header(track, ss.proteins_path)
+    with st.expander("🔎 Buscar a estrutura no RCSB (em vez de enviar o arquivo)",
+                     expanded=not bool(ss.pdb_path)):
+        if not accession:
+            st.caption(
+                f"A referência de `{track.replace('|', '_')}` não traz um accession do UniProt no "
+                "terceiro campo do cabeçalho (ex.: `NS1_DENV1_P29990`), então não há o que "
+                "perguntar ao PDBe. Envie o arquivo abaixo, ou gere a referência pelo POA0, que "
+                "escreve o accession no cabeçalho e já oferece as estruturas.")
+            return
+
+        st.caption(f"Accession lido do cabeçalho: **{accession}**. O PDBe responde quais entradas "
+                   "do PDB cobrem essa sequência; o arquivo vem do RCSB.")
+        if st.button("Buscar estruturas", key="viz_search_struct"):
+            with st.status("Consultando o PDBe…") as status:
+                try:
+                    ss.viz_structures = database_client.list_structures(accession, limit=15)
+                    status.update(label=f"{len(ss.viz_structures)} estrutura(s).", state="complete")
+                except (ServiceError, ServiceUnavailable) as exc:
+                    status.update(label="Consulta falhou.", state="error")
+                    st.error(f"{exc} O upload manual continua disponível.")
+                    return
+            if not ss.viz_structures:
+                st.warning(f"O PDBe não conhece estrutura para {accession}.")
+
+        if not ss.viz_structures:
+            return
+        labels = [str(s) for s in ss.viz_structures]
+        picked = st.selectbox("Estruturas que cobrem esta proteína", range(len(labels)),
+                              format_func=lambda i: labels[i], key="viz_struct_pick")
+        chosen = ss.viz_structures[picked]
+        if st.button("⬇️ Baixar e usar esta estrutura", type="primary", key="viz_fetch_struct"):
+            with st.status(f"Baixando {chosen.pdb_id} do RCSB…") as status:
+                try:
+                    text = database_client.fetch_structure(chosen.pdb_id)
+                except (ServiceError, ServiceUnavailable) as exc:
+                    status.update(label="Download falhou.", state="error")
+                    st.error(f"{exc} Estruturas muito grandes existem só como mmCIF; nesse caso "
+                             "baixe do site e envie o arquivo.")
+                    return
+                ss.pdb_path = backend.save_upload(
+                    ctx.inputs_dir, f"structure_{chosen.pdb_id}.pdb", text.encode("utf-8"),
+                    ctx=ctx, role="structure", original_name=f"{chosen.pdb_id}.pdb")
+                status.update(label=f"{chosen.pdb_id} baixada.", state="complete")
+            # Downloaded here, the numbering is still resolved by alignment: the exact SIFTS
+            # offset depends on which part of the sequence the reference covers, and only POA0
+            # records that. Said plainly rather than implied, since the difference is exactness.
+            st.info("Estrutura baixada e carregada. A numeração será conferida por alinhamento "
+                    "com a referência — para o mapeamento SIFTS exato, gere a referência e a "
+                    "estrutura juntas pelo POA0 na etapa 1.")
+            st.rerun()
 
 
 def _show_structure_identity(pdb_text: str, filename: str) -> None:

@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from ...logging_conf import get_logger
+from ...logging_conf import TAG_WARN, get_logger
 from ..artifacts import file_hash, safe_child
 
 logger = get_logger("conservancy")
@@ -147,7 +147,8 @@ def _csv_header(path) -> Optional[List[str]]:
     try:
         return list(pd.read_csv(path, nrows=0).columns)
     except (OSError, ValueError, pd.errors.ParserError) as exc:
-        logger.warning("Could not read the header of %s: %s", path, exc)
+        logger.warning("%s POA2/conservancy | could not read the header of %s: %s",
+                       TAG_WARN, path, exc)
         return None
 
 
@@ -234,7 +235,8 @@ def read_metadata(directory: str) -> Optional[ConservancyMeta]:
             files=_read_inventory(data.get("files")),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        logger.warning("Ignoring unreadable %s in %s: %s", METADATA_FILENAME, directory, exc)
+        logger.warning("%s POA2/conservancy | ignoring an unreadable %s in %s: %s",
+                       TAG_WARN, METADATA_FILENAME, directory, exc)
         return None
 
 
@@ -630,11 +632,13 @@ def _apply_identity_filter(dataframe: pd.DataFrame, ID_threshold, symbol) -> pd.
     try:
         threshold = float(ID_threshold)
     except (TypeError, ValueError):
-        logger.warning("Identity filter skipped: '%s' is not a usable threshold.", ID_threshold)
+        logger.warning("%s POA2/conservancy | identity filter skipped: '%s' is not a usable "
+                       "threshold.", TAG_WARN, ID_threshold)
         return dataframe
     if family == "ge":
         return dataframe[dataframe["Minimum identity"] >= threshold]
     if family == "lt":
         return dataframe[dataframe["Maximum identity"] < threshold]
-    logger.warning("Identity filter skipped: unknown operator '%s'.", symbol)
+    logger.warning("%s POA2/conservancy | identity filter skipped: unknown operator '%s'.",
+                   TAG_WARN, symbol)
     return dataframe
