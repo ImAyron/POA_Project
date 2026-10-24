@@ -1445,6 +1445,95 @@ def nonconforming_antigen_keys(path: str) -> List[str]:
     return [k for k in realdata_import.antigen_keys(path) if not re.match(BP2_ANTIGEN_KEY, str(k))]
 
 
+#: UniProt's own two accession patterns, as the registry defines them. Worth spelling out rather
+#: than approximating: a first draft used ``[A-NR-Z]`` for the leading letter, which excludes O, P
+#: and Q — and ``P29990`` (dengue NS1) is exactly the shape it rejected.
+_UNIPROT_ACCESSION = re.compile(
+    r"[OPQ][0-9][A-Z0-9]{3}[0-9]"
+    r"|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}")
+
+
+def accession_from_header(track: str, proteins_path: Optional[str]) -> str:
+    """
+    The UniProt accession of the reference behind ``Protein|Specie``, or ``''``.
+
+    The convention puts it in the third field of the header — ``NS1_DENV1_P29990`` — which is what
+    POA0 writes and what people working from UniProt tend to use as the ID. Anything else is not
+    an accession and is better treated as absent than guessed at: PDBe answers by accession, and
+    a wrong one would list the structures of another protein entirely, with nothing on screen to
+    say so.
+    """
+    if not proteins_path:
+        return ""
+    protein, specie = track.split("|")
+    for row in parse_fasta_headers(proteins_path):
+        if row["protein"] == protein.upper() and row["specie"] == specie.upper():
+            candidate = str(row["id"]).split("_")[0].strip().upper()
+            if _UNIPROT_ACCESSION.fullmatch(candidate):
+                return candidate
+            return ""
+    return ""
+
+
+#: Written by POA0 next to the files it generates.
+POA0_REPORT_FILENAME = "POA0_relatorio.json"
+
+
+def poa0_report(ctx: "WorkContext") -> Optional[Dict]:
+    """The POA0 report of this analysis, or ``None`` when the reference did not come from POA0."""
+    path = ctx.inputs_dir / POA0_REPORT_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("%s gui/poa0 | ignoring an unreadable %s: %s",
+                       TAG_WARN, POA0_REPORT_FILENAME, exc)
+        return None
+
+
+def structure_mapping(ctx: "WorkContext", pdb_path: Optional[str]) -> Optional[Dict[str, object]]:
+    """
+    The SIFTS correspondence POA0 recorded for ``pdb_path``, when it is the structure POA0 fetched.
+
+    SIFTS states, residue by residue, which position of the UniProt sequence a structure's
+    numbering corresponds to. It is exact, where an alignment is an estimate — and POA0 already
+    computes and stores it (``estrutura.offset_regiao``), relative to the region it wrote, which
+    is the coordinate system the epitope positions use.
+
+    Until now nothing read it back: ``map_epitopes`` accepted ``sifts_offset`` and no caller ever
+    passed one, so every structure fell to the alignment path while step 1 told the user the
+    mapping was in use. This is the function that makes that claim true.
+
+    Returns ``{"offset", "span", "pdb_id", "covers_region"}``, or ``None`` when this analysis has
+    no POA0 report, when the report is about a different structure file, or when PDBe knew no
+    mapping — all cases where the alignment remains the right answer.
+    """
+    if not pdb_path:
+        return None
+    report = poa0_report(ctx)
+    structure = (report or {}).get("estrutura") or {}
+    recorded = (report or {}).get("arquivos", {}).get("estrutura")
+    if not structure or "offset_regiao" not in structure:
+        return None
+    # The report describes one structure. A different file in the viewer is not it, and applying
+    # another structure's offset would place the epitopes confidently on the wrong residues.
+    if not recorded or Path(recorded).name != Path(pdb_path).name:
+        return None
+    sifts = structure.get("sifts") or {}
+    region = (report or {}).get("regiao") or {}
+    length = int((report or {}).get("sequencia", {}).get("tamanho", 0))
+    span = (1, length) if length else None
+    return {
+        "offset": int(structure["offset_regiao"]),
+        "span": span,
+        "pdb_id": structure.get("pdb_id", ""),
+        "chain": sifts.get("chain", ""),
+        "covers_region": bool(structure.get("cobre_regiao", True)),
+        "region": (region.get("start"), region.get("end")),
+    }
+
+
 def reference_sequence(ctx: "WorkContext", protein: str, specie: str,
                        proteins_path: Optional[str] = None) -> Optional[Dict[str, str]]:
     """

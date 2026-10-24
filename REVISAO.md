@@ -1,3 +1,61 @@
+# Etapa 7: buscar a estrutura e usar o SIFTS — 19/10/2026
+
+Duas coisas que o repositório tinha pela metade, apontadas na revisão do PR #2 e ainda abertas.
+Suíte: de 513 para **526 passando**, no ambiente conda `poa` da WSL.
+
+## O SIFTS era código morto
+
+`map_epitopes` aceitava `sifts_offset` e **nenhum chamador passava um**. O POA0 calculava o
+mapeamento e gravava em `estrutura.offset_regiao`; a etapa 1 dizia ao usuário que "a estrutura
+baixada aqui já vem com o mapeamento SIFTS — que é o que a etapa 7 usa"; e a etapa 7 caía no
+alinhamento. A afirmação era falsa, e a diferença não é cosmética: SIFTS declara a correspondência
+resíduo a resíduo, o alinhamento a estima.
+
+`backend.structure_mapping` lê o registro de volta e a etapa 7 o repassa. A interface agora diz
+qual das duas rotas resolveu a numeração, em vez de deixar implícito.
+
+Uma guarda que vale registrar: o relatório descreve **uma** estrutura. Se o arquivo no visualizador
+for outro, o mapeamento é ignorado — aplicar o offset de uma estrutura a outra colocaria os
+epítopos com confiança sobre os resíduos errados, que é a falha do 4C23 agravada pelo selo de
+"exato".
+
+## Buscar a estrutura na etapa 7
+
+Baixar do RCSB só existia na etapa 1, enquanto o POA0 gerava a referência. Quem enviou o próprio
+FASTA, ou quis trocar de estrutura depois, tinha que ir ao site. Agora há um expansor na etapa 7
+que lê o accession do terceiro campo do cabeçalho, pergunta ao PDBe quais entradas cobrem a
+proteína e baixa a escolhida — reaproveitando `list_structures` e `fetch_structure`, sem código de
+rede novo. O arquivo entra pelo mesmo `save_upload` com `role="structure"`, então já é gravado na
+análise e recarregado depois.
+
+Sem accession no cabeçalho, a etapa diz isso e deixa o upload como caminho — em vez de buscar algo
+que não consegue identificar. E uma estrutura baixada aqui ainda é conferida por **alinhamento**:
+o offset exato depende de qual trecho da sequência a referência cobre, e só o POA0 registra isso.
+A interface diz essa diferença em vez de insinuá-la.
+
+## Um defeito que o teste pegou
+
+O regex de accession do UniProt começava com `[A-NR-Z]`, que **exclui O, P e Q** — e `P29990`,
+a NS1 de dengue, é exatamente a forma que ele recusava. Trocado pelos dois padrões oficiais do
+registro, com os dois formatos (6 e 10 caracteres) cobertos por teste parametrizado.
+
+## Um achado da revisão do PR #2 que se verificou improcedente
+
+"O destaque é pintado em todas as cadeias" **não é mais um defeito vivo**: a etapa 7 atribui
+`chain = report.chain` após o mapeamento, e nos caminhos em que não há verificação os intervalos
+ficam vazios — nada é destacado. Deixo registrado para não ser reinvestigado.
+
+## Ainda em aberto
+
+- **`.docx` versionado** (`Relatorio_Alternativas_Ferramentas_POA.docx`, 40 KB, fora do
+  `.gitignore`). Não removido: apagar arquivo versionado de outro autor é decisão do time.
+- Cadeia única escolhida por ordem de arquivo; *outage* de API indistinguível de "sem dados";
+  apagar análise falhando no Windows; saída do POA2 sobrescrevendo quando só `-m`/`-imin`/`-imax`/
+  `-idf` mudam; e o denominador da conservância versus o IEDB, que continua sendo decisão
+  científica.
+
+---
+
 # Recarregar uma análise — 16/10/2026
 
 Reabrir uma análise passou a devolver **todos** os arquivos dela à etapa em que foram usados.
