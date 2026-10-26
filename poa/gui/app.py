@@ -649,9 +649,9 @@ def step_inputs():
                                          ctx=ctx, role="reference", original_name=u.name)
                       for i, u in enumerate(ups)]
 
-    swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `denv1_ns1`) — inverter "
-                       "os dois primeiros campos", value=ss.ref_swap, key="ref_swap_cb",
-                       help=HELP["swap_headers"])
+    swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `alphavirus_e2`) — "
+                       "inverter os dois primeiros campos",
+                       value=ss.ref_swap, key="ref_swap_cb", help=HELP["swap_headers"])
     ss.ref_swap = swap
 
     if ss.ref_raw:
@@ -984,14 +984,17 @@ def _render_source_previews(sources):
     this the first sign of either was an empty or mis-grouped table two steps later.
     """
     st.subheader("Conteúdo dos arquivos enviados")
-    st.caption("Este é o **conteúdo bruto** de cada arquivo, lido do próprio arquivo. Os epítopos "
-               "em si são extraídos pelo POA1 (etapa 3), com os parâmetros de filtragem da etapa 1 "
-               "— por isso aqui aparece o que o arquivo traz, não o que o POA1 vai selecionar.")
+    st.caption("Este é o **conteúdo** de cada arquivo, lido do próprio arquivo. Os epítopos em si "
+               "são extraídos pelo POA1 (etapa 3), com os parâmetros de filtragem da etapa 1 — por "
+               "isso aqui aparece o que o arquivo traz, não o que o POA1 vai selecionar.")
 
-    previews = backend.summarize_sources(sources)
+    previews = backend.summarize_sources(sources, reference=ss.proteins_path)
     all_species = sorted({sp for p in previews for sp in p.species})
     if all_species:
         st.info("Espécies encontradas nos arquivos de predição: " + ", ".join(all_species))
+    st.caption("Proteína e espécie são mostradas na ordem que o `-f` da etapa 1 usa, que é como "
+               "o POA1 vai lê-las — mesmo quando o arquivo de predição traz os dois campos na "
+               "ordem contrária.")
 
     for prev in previews:
         unit = {"fasta": "registro(s)", "json": "antígeno(s)",
@@ -1145,9 +1148,21 @@ def step_poa1():
         if diag["unpredicted"]:
             st.warning("Espécies no -f sem nenhum epítopo predito: " + ", ".join(diag["unpredicted"]))
         if diag["reference"] and diag["predicted"] and not set(diag["reference"]) & set(diag["predicted"]):
-            st.warning("Nenhuma espécie do -f coincide com as das predições. Verifique na etapa 1 a "
-                       "tabela de leitura dos cabeçalhos — se a coluna Espécie estiver mostrando o "
-                       "nome da proteína, marque a caixa de inversão `Espécie_Proteína`.")
+            # Which remedy to name depends on whether the inversion is already on: telling someone
+            # to tick a box they ticked is what this message used to do, because the inversion
+            # reached only the -f and the mismatch it produced looked identical to not having
+            # ticked it at all.
+            if ss.ref_swap:
+                st.warning(
+                    "Nenhuma espécie do -f coincide com as das predições, **mesmo com a inversão "
+                    "`Espécie_Proteína` marcada**. Execute o POA1 de novo: a inversão passou a ser "
+                    "aplicada também às predições, e este resultado é de uma execução anterior, "
+                    "quando ela valia só para a referência.")
+            else:
+                st.warning(
+                    "Nenhuma espécie do -f coincide com as das predições. Verifique na etapa 1 a "
+                    "tabela de leitura dos cabeçalhos — se a coluna Espécie estiver mostrando o "
+                    "nome da proteína, marque a caixa de inversão `Espécie_Proteína`.")
 
         st.subheader("Epítopos consolidados")
         st.dataframe(df, width="stretch", height=320)

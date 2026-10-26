@@ -1,3 +1,83 @@
+# A inversão `Espécie_Proteína` alcançando as predições — 26/10/2026
+
+Relatado a partir de um caso real: um consenso de E2 de alphavirus, cabeçalho
+`alphavirus_e2_consenso` — **espécie alphavirus, proteína E2**. Com a caixa da etapa 1 marcada, a
+interface ainda mostrava `Espécies: E2` nas etapas 2 e 3.
+
+Suíte: de 526 para **539 passando**, no ambiente conda `poa` da WSL.
+
+## A raiz
+
+A inversão era aplicada **só ao FASTA de referência** (`normalize_fasta_headers` sobre
+`ss.ref_raw`). Nada a aplicava às predições, e a mesma string era lida de duas formas:
+
+| Origem | Cabeçalho | Resultado |
+|---|---|---|
+| Referência (`-f`) | `alphavirus_e2_consenso` | proteína `E2`, espécie `ALPHAVIRUS` ✓ |
+| Predição (chave do JSON `-b2`) | `alphavirus_e2_consenso` | proteína `ALPHAVIRUS`, espécie `E2` ✗ |
+
+Daí os três diagnósticos simultâneos da etapa 3, todos corretos: epítopos com espécie `E2`, `-f`
+com espécie `ALPHAVIRUS`, nenhuma coincidência.
+
+**O adaptador da etapa 2 não ajudava**, por um motivo sutil: ele só é oferecido quando as chaves de
+antígeno falham no regex da convenção, `(\w+?)_(\w+?)_(\w+)`. A chave `alphavirus_e2_consenso` tem
+três campos e **passa** — a verificação é sintática, o erro é semântico, e `alphavirus_e2_consenso`
+e `e2_alphavirus_consenso` são indistinguíveis para um regex.
+
+## A correção
+
+Num ponto só: logo após `consolidate_predictions` e antes do relatório, dos arquivos por espécie e
+de tudo que vem depois. Cada método carrega a convenção à sua maneira — chave de JSON no `-b2`,
+cabeçalho FASTA no `-b3` e no `-x`, linha `>ID` no `-p`, identificador dentro da página no `-n`,
+**nome de arquivo** no `-m` — e tratar os seis formatos separadamente seriam seis lugares para
+manter em sincronia, cada parser tendo que conhecer uma configuração da interface.
+
+### A primeira versão estava errada, e o teste real a derrubou
+
+Ela invertia **todas** as predições quando a caixa estava marcada. Isso corrigia os arquivos que o
+usuário envia e **estragava os que a própria interface gera**: o EMBOSS antigenic, o BepiPred-3.0
+e a API do MHC-II rodam sobre `ss.proteins_path`, que é o `-f` **já normalizado**, então produzem
+`E2_ALPHAVIRUS_CONSENSO` — já na ordem certa. Numa execução com os dois tipos, nenhuma decisão
+única acerta.
+
+A versão final não declara nada: compara **cada epítopo com o `-f`**. Par presente na referência →
+já correto; par invertido → alinha; par que não existe em nenhuma ordem → deixa como veio, porque
+espécie ausente do `-f` já é relatada pelo diagnóstico da etapa 3 e adivinhar aqui só faria a
+resposta errada parecer deliberada. O `-swap` da CLI foi removido: virou desnecessário.
+
+### E a validação revelou um segundo defeito
+
+Os parsers discordam na **caixa** — o b2 preserva o `alphavirus` do JSON, o PAP/IMED sobe para
+`ALPHAVIRUS` — e a etapa 4 nomeia os arquivos por essa coluna. A mesma espécie chegando por dois
+métodos era gravada como `alphavirus_epitopes.fasta` **e** `ALPHAVIRUS_epitopes.fasta`, e a
+conservância comparava cada metade contra um conjunto como se fossem organismos diferentes. Um
+registro reconhecido passa a receber a **grafia** do `-f`, não só a ordem.
+
+Verificado com os arquivos reais do caso, os dois tipos na mesma execução:
+
+```
+-f da etapa 1 : >E2_ALPHAVIRUS_CONSENSO
+JSON enviado  : ordem invertida na origem
+PAP gerado    : ordem ja correta na origem
+->  15 epitopos | Especie ['ALPHAVIRUS'] | Proteina ['E2']
+    faltando no -f []   FASTA da etapa 4 ['ALPHAVIRUS_epitopes.fasta']
+```
+
+## Duas falhas de comunicação, corrigidas junto
+
+- **O rótulo da caixa mentia por omissão:** "Meus cabeçalhos estão em `Espécie_Proteína`", no
+  plural e sem ressalva, agindo em um lugar só. Passa a dizer "na referência e nas predições".
+- **O diagnóstico da etapa 3 prescrevia o remédio errado:** mandava marcar a caixa quando ela já
+  estava marcada, porque o desencontro que a inversão pela metade produzia era idêntico ao de não
+  tê-la marcado. Agora distingue os dois casos.
+
+## Consequência para análises já feitas
+
+Qualquer análise rodada com a caixa marcada e cabeçalhos `Espécie_Proteína` agrupou a conservância
+pelo nome da proteína. **Precisa ser reexecutada** a partir da etapa 3.
+
+---
+
 # Etapa 7: buscar a estrutura e usar o SIFTS — 19/10/2026
 
 Duas coisas que o repositório tinha pela metade, apontadas na revisão do PR #2 e ainda abertas.

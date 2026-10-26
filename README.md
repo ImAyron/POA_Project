@@ -177,6 +177,29 @@ Revisão de código, correções e melhorias propostas: [`REVISAO.md`](REVISAO.m
 > diagnóstico das espécies identificadas — incluindo as que aparecem nos epítopos mas faltam no
 > `-f`. Coberto por `tests/test_multispecies.py`.
 
+> **Corrigido (a inversão `Espécie_Proteína` chegava só na referência):** a caixa da etapa 1
+> reescrevia o `-f`, e nada aplicava a mesma inversão às predições — então as duas metades da
+> mesma execução liam a mesma string de formas diferentes. Com um consenso de cabeçalho
+> `alphavirus_e2_consenso` (espécie *alphavirus*, proteína *E2*), o `-f` virava proteína `E2` /
+> espécie `ALPHAVIRUS` enquanto os epítopos viravam proteína `ALPHAVIRUS` / espécie `E2`; a
+> etapa 3 relatava zero coincidência entre eles, a etapa 4 gravava `e2_epitopes.fasta` e a
+> conservância comparava uma "espécie" que era o nome da proteína. Pior, o diagnóstico mandava
+> marcar a caixa **que já estava marcada**.
+>
+> Agora o POA1 compara **cada epítopo com o `-f`** e alinha o que vier invertido, num ponto só,
+> depois da consolidação e antes do
+> relatório e dos arquivos por espécie — cada método carrega a convenção à sua maneira (chave de
+> JSON no `-b2`, cabeçalho FASTA no `-b3` e no `-x`, linha `>ID` no `-p`, identificador na página
+> no `-n`, **nome de arquivo** no `-m`), e tratar os seis separadamente seriam seis lugares para
+> manter em sincronia. Não há opção a declarar: a etapa 1 estabelece a convenção da análise, e o
+> POA1 segue o `-f`. Isso importa porque os arquivos de predição não são uniformes — um que
+> **você** envia traz a ordem da ferramenta de origem, enquanto um que a interface **gera**
+> (EMBOSS antigenic, BepiPred-3.0, API do MHC-II) já sai na ordem do `-f`, porque é dele que foi
+> gerado. Uma inversão em bloco corrigia o primeiro e estragava o segundo.
+>
+> Um registro reconhecido também recebe a **grafia** do `-f`: os parsers discordam na caixa, e a
+> mesma espécie chegando por dois métodos era gravada como dois arquivos na etapa 4.
+
 > **Cabeçalhos fora da convenção (corrigido):** se o JSON do BepiPred-2.0 traz várias espécies em
 > um só arquivo (chaves como `denv1`/`denv2`, sem proteína nem ID) ou se o `-f` usa
 > `Espécie_Proteína` (`denv1_ns1`), nenhuma espécie era extraída e todos os epítopos saíam sem

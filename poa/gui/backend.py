@@ -1059,8 +1059,16 @@ class SourcePreview:
     notes: List[str] = field(default_factory=list)
 
 
-def summarize_source(path: str, key: str) -> SourcePreview:
-    """Describe one prediction file (see :class:`SourcePreview`); ``key`` is the POA1 method."""
+def summarize_source(path: str, key: str, reference_pairs: Optional[set] = None) -> SourcePreview:
+    """
+    Describe one prediction file (see :class:`SourcePreview`); ``key`` is the POA1 method.
+
+    ``reference_pairs`` are the ``(PROTEIN, SPECIE)`` pairs of the ``-f``. The preview reads the
+    file directly rather than through POA1, so without them it reported each field in the file's
+    own order — and a user who had settled the convention in step 1 still read "Espécies: E2"
+    here for a protein called E2. Shown the way POA1 will read it, which is what the preview is
+    for: catching the wrong file, not rehearsing the order its source happened to use.
+    """
     label, kind = _SOURCE_KINDS.get(key, (key, "text"))
     target = Path(path)
     preview = SourcePreview(label=label, name=target.name, kind=kind,
@@ -1081,6 +1089,9 @@ def summarize_source(path: str, key: str) -> SourcePreview:
 
     if kind == "fasta":
         records = parse_fasta_headers(str(target))
+        for row in records:
+            row["protein"], row["specie"] = _oriented(row["protein"], row["specie"],
+                                                      reference_pairs)
         preview.n_records = len(records)
         preview.species = sorted({r["specie"] for r in records if r["specie"]})
         preview.proteins = sorted({r["protein"] for r in records if r["protein"]})
@@ -1103,8 +1114,12 @@ def summarize_source(path: str, key: str) -> SourcePreview:
             return preview
         preview.n_records = len(keys)
         preview.rows = [{"Antígeno": k, "Convenção": "❌" if k in bad else "✅"} for k in keys]
-        preview.species = sorted({str(k).upper().split("_")[1] for k in keys
-                                  if len(str(k).split("_")) > 1})
+        species = set()
+        for key_name in keys:
+            fields = str(key_name).upper().split("_")
+            if len(fields) > 1:
+                species.add(_oriented(fields[0], fields[1], reference_pairs)[1])
+        preview.species = sorted(species)
         if bad:
             preview.notes.append(
                 "Antígeno(s) fora da convenção `Proteína_Espécie_ID`: " + ", ".join(map(str, bad))
@@ -1118,9 +1133,23 @@ def summarize_source(path: str, key: str) -> SourcePreview:
     return preview
 
 
-def summarize_sources(sources: Dict[str, List[str]]) -> List[SourcePreview]:
+def _oriented(protein: str, specie: str, pairs: Optional[set]):
+    """``(protein, specie)`` the way the ``-f`` has them; unchanged when it has neither order."""
+    if not pairs:
+        return protein, specie
+    upper = (str(protein).upper(), str(specie).upper())
+    if upper in pairs:
+        return protein, specie
+    if (upper[1], upper[0]) in pairs:
+        return specie, protein
+    return protein, specie
+
+
+def summarize_sources(sources: Dict[str, List[str]],
+                      reference: Optional[str] = None) -> List[SourcePreview]:
     """Describe every collected prediction input, in method order."""
-    return [summarize_source(path, key)
+    pairs = pipeline.reference_header_pairs(reference) if reference else None
+    return [summarize_source(path, key, pairs)
             for key in sorted(sources) for path in sources[key]]
 
 
