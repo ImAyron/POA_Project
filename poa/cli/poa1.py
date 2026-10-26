@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     required.add_argument("-d", help="Directory for analysis results", required="True", type=str, default="")
     required.add_argument("-f", help="Polyproteins/proteins used in predictions analysis in fasta format", required="True", type=str, default="")
     optional.add_argument("-e", help="Analysis results in .xlsx format (y/n)", type=str, default="n")
+    optional.add_argument(
+        "-swap", action="store_true",
+        help=("Input headers are Specie_Protein[_ID] instead of Protein_Specie[_ID]; swap the two "
+              "first fields. Applies to every method, since each carries the convention its own "
+              "way (JSON key, FASTA header, file name). Off by default."))
     return parser
 
 

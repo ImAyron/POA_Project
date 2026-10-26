@@ -342,6 +342,9 @@ def build_poa1_args(files: Dict[str, str], params: Dict, proteins_path: str, out
         d=out_dir,
         f=proteins_path,
         e=str(params.get("e", "n")),
+        # Step 1's "my headers are Specie_Protein" rewrote only the -f. The predictions carry the
+        # same convention and were left as they came, so both halves of one run had to be told.
+        swap=bool(params.get("swap", False)),
     )
 
 
@@ -1059,8 +1062,16 @@ class SourcePreview:
     notes: List[str] = field(default_factory=list)
 
 
-def summarize_source(path: str, key: str) -> SourcePreview:
-    """Describe one prediction file (see :class:`SourcePreview`); ``key`` is the POA1 method."""
+def summarize_source(path: str, key: str, swap: bool = False) -> SourcePreview:
+    """
+    Describe one prediction file (see :class:`SourcePreview`); ``key`` is the POA1 method.
+
+    ``swap`` is step 1's "my headers are ``Specie_Protein``". The preview reads the file directly
+    rather than through POA1, so without being told it reported the fields in the file's own
+    order: a user who had declared the inversion, and seen step 1 agree with them, still read
+    "Espécies: E2" here for a protein called E2. The preview exists to catch the wrong file or an
+    unreadable convention, and showing the order the pipeline will *not* use works against that.
+    """
     label, kind = _SOURCE_KINDS.get(key, (key, "text"))
     target = Path(path)
     preview = SourcePreview(label=label, name=target.name, kind=kind,
@@ -1081,6 +1092,9 @@ def summarize_source(path: str, key: str) -> SourcePreview:
 
     if kind == "fasta":
         records = parse_fasta_headers(str(target))
+        if swap:
+            for row in records:
+                row["protein"], row["specie"] = row["specie"], row["protein"]
         preview.n_records = len(records)
         preview.species = sorted({r["specie"] for r in records if r["specie"]})
         preview.proteins = sorted({r["protein"] for r in records if r["protein"]})
@@ -1103,7 +1117,9 @@ def summarize_source(path: str, key: str) -> SourcePreview:
             return preview
         preview.n_records = len(keys)
         preview.rows = [{"Antígeno": k, "Convenção": "❌" if k in bad else "✅"} for k in keys]
-        preview.species = sorted({str(k).upper().split("_")[1] for k in keys
+        # Field 1 is the species under the convention, field 0 once the inversion is declared.
+        field = 0 if swap else 1
+        preview.species = sorted({str(k).upper().split("_")[field] for k in keys
                                   if len(str(k).split("_")) > 1})
         if bad:
             preview.notes.append(
@@ -1118,9 +1134,9 @@ def summarize_source(path: str, key: str) -> SourcePreview:
     return preview
 
 
-def summarize_sources(sources: Dict[str, List[str]]) -> List[SourcePreview]:
+def summarize_sources(sources: Dict[str, List[str]], swap: bool = False) -> List[SourcePreview]:
     """Describe every collected prediction input, in method order."""
-    return [summarize_source(path, key)
+    return [summarize_source(path, key, swap)
             for key in sorted(sources) for path in sources[key]]
 
 

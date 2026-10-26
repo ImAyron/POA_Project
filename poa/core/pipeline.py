@@ -247,6 +247,23 @@ def _run_poa1(args) -> Poa1Result:
         # Organize prediction results
         results_df = consolidate_predictions(args)
 
+        # Headers in Specie_Protein order are corrected here, after every parser has run and
+        # before anything downstream reads the columns. The GUI already rewrote the -f this way,
+        # but nothing touched the predictions, so the two halves of the same run disagreed: a
+        # reference of 'alphavirus_e2_consenso' became protein E2 / species ALPHAVIRUS while the
+        # epitopes from the same string became protein ALPHAVIRUS / species E2, and step 3
+        # reported zero overlap between them.
+        #
+        # One point rather than six: the convention is carried differently by every input — a JSON
+        # antigen key for -b2, a FASTA header for -b3 and -x, a '>ID' line for -p, an identifier
+        # inside the page for -n, and the *file name* for -m. Swapping after consolidation covers
+        # all of them, and the report, the per-species FASTAs, the conservancy and POA2 all read
+        # the corrected values.
+        if getattr(args, "swap", False) and len(results_df):
+            results_df = results_df.rename(columns={"Protein": "Specie", "Specie": "Protein"})
+            results_df = results_df[list(STANDARD_COLUMNS)]
+            run.note("headers read as Specie_Protein: the two first fields were swapped")
+
         # Checking if all epitopes are smaller than proteins in analysis
         report.checkViability(lenght_seq_dict, results_df, "Peptide Sequence")
 

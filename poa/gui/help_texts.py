@@ -52,9 +52,13 @@ HELP = {
     ),
     "swap_headers": (
         "Marque se os seus cabeçalhos estão na ordem inversa, `Espécie_Proteína` (ex.: "
-        "`denv1_ns1`). Sem isso, `denv1_ns1` é lido como proteína `DENV1` da espécie `NS1`, e "
-        "todas as sequências caem numa mesma 'espécie' inexistente — sem mensagem de erro, só um "
-        "resultado errado."
+        "`alphavirus_e2`). Sem isso, `alphavirus_e2` é lido como proteína `ALPHAVIRUS` da espécie "
+        "`E2`, e todas as sequências caem numa 'espécie' que é na verdade o nome da proteína — sem "
+        "mensagem de erro, só um resultado errado.\n\n"
+        "A inversão vale para a **referência e para as predições**. Cada método carrega a "
+        "convenção à sua maneira — chave de JSON no BepiPred-2.0, cabeçalho FASTA no 3.0 e em "
+        "outros preditores, nome de arquivo no MHC-II — e todos são corrigidos no POA1, antes do "
+        "relatório e dos arquivos por espécie."
     ),
     "len_min": (
         "Comprimento mínimo, em resíduos, para um epítopo deste método ser mantido. "
