@@ -55,10 +55,13 @@ HELP = {
         "`alphavirus_e2`). Sem isso, `alphavirus_e2` é lido como proteína `ALPHAVIRUS` da espécie "
         "`E2`, e todas as sequências caem numa 'espécie' que é na verdade o nome da proteína — sem "
         "mensagem de erro, só um resultado errado.\n\n"
-        "A inversão vale para a **referência e para as predições**. Cada método carrega a "
-        "convenção à sua maneira — chave de JSON no BepiPred-2.0, cabeçalho FASTA no 3.0 e em "
-        "outros preditores, nome de arquivo no MHC-II — e todos são corrigidos no POA1, antes do "
-        "relatório e dos arquivos por espécie."
+        "Esta caixa define a convenção **da análise inteira**: é o `-f` que sai daqui que diz, "
+        "daí em diante, qual campo é a proteína e qual é a espécie.\n\n"
+        "Os arquivos de predição não precisam seguir a mesma ordem. O POA1 compara cada epítopo "
+        "com o `-f` e corrige os que vierem invertidos — o que importa porque eles não são "
+        "uniformes: um arquivo que **você** envia traz a ordem da ferramenta que o gerou, "
+        "enquanto um arquivo que a interface **gera** (EMBOSS antigenic, BepiPred-3.0, API do "
+        "MHC-II) já sai na ordem do `-f`, porque é dele que foi gerado."
     ),
     "len_min": (
         "Comprimento mínimo, em resíduos, para um epítopo deste método ser mantido. "

@@ -1,163 +1,212 @@
-"""A inversão `Espécie_Proteína` alcançando as predições, e não só a referência.
+"""Proteína e espécie alinhadas ao `-f`, registro a registro.
 
-O caso real que expôs isto: um consenso de E2 de alphavirus, com cabeçalho
-``alphavirus_e2_consenso`` — espécie **alphavirus**, proteína **E2** — e o JSON do BepiPred-2.0
-com a mesma string como chave de antígeno.
+Dois casos reais, com exigências opostas, no mesmo pipeline:
 
-Marcada a caixa da etapa 1, o ``-f`` era reescrito para proteína ``E2`` / espécie ``ALPHAVIRUS``,
-e as predições continuavam a ser lidas ao contrário. As duas metades da mesma execução discordavam,
-e a etapa 3 relatava zero coincidência entre elas — depois de mandar marcar a caixa que já estava
-marcada.
+* um consenso de E2 de alphavirus com cabeçalho ``alphavirus_e2_consenso`` — espécie *alphavirus*,
+  proteína *E2* — e o JSON do BepiPred-2.0 com a mesma string. Enviados pelo usuário, trazem a
+  ordem da ferramenta que os gerou e **precisam** ser invertidos;
+* o `.txt` que a própria interface gera pelo EMBOSS antigenic, produzido **a partir do `-f` já
+  normalizado**, que sai na ordem da convenção e **não pode** ser invertido.
 
-A correção é num ponto só, depois da consolidação: cada método carrega a convenção à sua maneira
-(chave de JSON, cabeçalho FASTA, nome de arquivo), e tratar os seis formatos separadamente seria
-seis lugares para manter em sincronia.
+Uma inversão em bloco corrigia o primeiro e estragava o segundo. Comparar cada epítopo com o `-f`
+resolve os dois sem ninguém declarar nada: a etapa 1 estabelece a verdade, e o POA1 alinha o que
+discordar dela.
 """
 import json
-
-import pytest
 
 from poa.core import pipeline
 from poa.gui import backend
 
 
 def _b2_json(path, key="alphavirus_e2_consenso"):
-    """Um JSON do BepiPred-2.0 com uma chave de antígeno e um resíduo antigênico."""
+    """Um JSON do BepiPred-2.0 com uma chave de antígeno e dois resíduos antigênicos."""
     path.write_text(json.dumps({"antigens": {key: {
         "AA": list("MKTAYIA"), "PRED": [0, 0.9, 0.9, 0, 0, 0, 0]}}}), encoding="utf-8")
     return str(path)
 
 
-def _args(tmp_path, b2, reference_header, swap):
+def _pap_txt(path, header="E2_ALPHAVIRUS_CONSENSO"):
+    """O que o EMBOSS antigenic produz: cabeçalho vindo do próprio -f, já na ordem certa."""
+    path.write_text(f">{header}\nn\tStart\tSequence\tEnd\n1\t2\tKTAYI\t6\n", encoding="utf-8")
+    return str(path)
+
+
+def _reference(tmp_path, header="E2_ALPHAVIRUS_CONSENSO"):
     fasta = tmp_path / "ref.fasta"
-    fasta.write_text(f">{reference_header}\nMKTAYIA\n", encoding="utf-8")
-    return backend.build_poa1_args({"b2": b2}, {"swap": swap}, str(fasta),
-                                   str(tmp_path / "out"))
+    fasta.write_text(f">{header}\nMKTAYIA\n", encoding="utf-8")
+    return str(fasta)
 
 
-def test_the_swap_reaches_the_predictions(tmp_path):
+def _run(tmp_path, files, reference, name="out"):
+    args = backend.build_poa1_args(files, {}, reference, str(tmp_path / name))
+    return pipeline.run_poa1(args)
+
+
+# --------------------------------------------------------------- o alinhamento
+def test_an_uploaded_file_in_the_other_order_is_aligned(tmp_path):
     """
-    Espécie e proteína saem na ordem certa também nos epítopos.
+    O caso original: o JSON do usuário traz `alphavirus_e2`, o `-f` diz E2/ALPHAVIRUS.
 
-    Antes, a referência era corrigida e as predições não: o mesmo
-    ``alphavirus_e2_consenso`` virava proteína ``E2``/espécie ``ALPHAVIRUS`` de um lado e
-    proteína ``ALPHAVIRUS``/espécie ``E2`` do outro.
+    Sem isso, o `-f` e os epítopos da mesma string discordavam, e a etapa 3 relatava zero
+    coincidência entre eles.
     """
-    b2 = _b2_json(tmp_path / "ep.json")
-    args = _args(tmp_path, b2, "E2_ALPHAVIRUS_CONSENSO", swap=True)
+    result = _run(tmp_path, {"b2": _b2_json(tmp_path / "ep.json")}, _reference(tmp_path))
 
-    result = pipeline.run_poa1(args)
-
-    # O parser do BepiPred-2.0 preserva a caixa da chave do JSON; o que este teste fixa é a
-    # ordem dos campos, não a caixa.
     assert {s.upper() for s in result.predictions["Specie"]} == {"ALPHAVIRUS"}
     assert {s.upper() for s in result.predictions["Protein"]} == {"E2"}
 
 
-def test_without_the_flag_nothing_is_swapped(tmp_path):
-    """O padrão preserva o comportamento da linha de comando, que não tem a caixa."""
-    b2 = _b2_json(tmp_path / "ep.json")
-    args = _args(tmp_path, b2, "ALPHAVIRUS_E2_CONSENSO", swap=False)
-
-    result = pipeline.run_poa1(args)
-
-    assert {s.upper() for s in result.predictions["Specie"]} == {"E2"}
-    assert {s.upper() for s in result.predictions["Protein"]} == {"ALPHAVIRUS"}
-
-
-def test_the_reference_and_the_predictions_agree_after_the_swap(tmp_path):
+def test_a_file_the_app_generated_is_left_alone(tmp_path):
     """
-    O sintoma que o usuário via: zero coincidência entre o -f e os epítopos.
+    O caso que a inversão em bloco quebrava.
 
-    É o diagnóstico da etapa 3, e ele só some quando os dois lados são corrigidos.
+    O EMBOSS antigenic roda sobre `ss.proteins_path` — o `-f` **já normalizado** — então o `.txt`
+    sai com `E2_ALPHAVIRUS_CONSENSO`. Inverter por decreto o tornava errado; comparar com o `-f`
+    o reconhece como já correto.
     """
-    b2 = _b2_json(tmp_path / "ep.json")
-    args = _args(tmp_path, b2, "E2_ALPHAVIRUS_CONSENSO", swap=True)
+    result = _run(tmp_path, {"p": _pap_txt(tmp_path / "pap.txt")}, _reference(tmp_path))
 
-    result = pipeline.run_poa1(args)
-    diag = backend.species_diagnostics(args.f, result.predictions)
+    assert {s.upper() for s in result.predictions["Specie"]} == {"ALPHAVIRUS"}
+    assert {s.upper() for s in result.predictions["Protein"]} == {"E2"}
+
+
+def test_the_two_kinds_coexist_in_one_run(tmp_path):
+    """
+    O que torna a detecção necessária em vez de conveniente.
+
+    Numa mesma execução há arquivos enviados e arquivos gerados, com ordens opostas. Nenhuma
+    decisão única — inverter tudo ou não inverter nada — acerta os dois.
+    """
+    result = _run(tmp_path, {"b2": _b2_json(tmp_path / "ep.json"),
+                             "p": _pap_txt(tmp_path / "pap.txt")}, _reference(tmp_path))
+
+    assert len(result.predictions) > 1, "os dois métodos precisam ter contribuído"
+    assert {s.upper() for s in result.predictions["Specie"]} == {"ALPHAVIRUS"}
+    assert {s.upper() for s in result.predictions["Protein"]} == {"E2"}
+
+
+def test_a_pair_the_reference_does_not_have_is_left_untouched(tmp_path):
+    """
+    Espécie ausente do `-f` já é relatada pelo diagnóstico da etapa 3.
+
+    Adivinhar aqui só faria a resposta errada parecer deliberada.
+    """
+    b2 = _b2_json(tmp_path / "ep.json", key="ns1_denv1_ref")
+    result = _run(tmp_path, {"b2": b2}, _reference(tmp_path))
+
+    assert {s.upper() for s in result.predictions["Specie"]} == {"DENV1"}
+    assert {s.upper() for s in result.predictions["Protein"]} == {"NS1"}
+
+
+def test_the_per_species_fasta_uses_the_aligned_species(tmp_path):
+    """Os arquivos da etapa 4 são nomeados pela espécie, e é por eles que a conservância agrupa."""
+    from pathlib import Path
+
+    result = _run(tmp_path, {"b2": _b2_json(tmp_path / "ep.json")}, _reference(tmp_path))
+    written = sorted(p.name for p in Path(result.conservancy_dir).glob("*"))
+
+    assert any(n.upper().startswith("ALPHAVIRUS") for n in written), written
+    assert not any(n.upper().startswith("E2_") for n in written), written
+
+
+def test_the_reference_and_the_predictions_end_up_agreeing(tmp_path):
+    """O sintoma que o usuário via: zero coincidência entre o -f e os epítopos."""
+    reference = _reference(tmp_path)
+    result = _run(tmp_path, {"b2": _b2_json(tmp_path / "ep.json")}, reference)
+
+    diag = backend.species_diagnostics(reference, result.predictions)
 
     assert diag["predicted"] == ["ALPHAVIRUS"]
     assert not diag["missing_from_reference"], diag
 
 
-def test_the_per_species_fasta_uses_the_corrected_species(tmp_path):
-    """
-    Os arquivos da etapa 4 são nomeados pela espécie, e é por eles que a conservância agrupa.
+# --------------------------------------------------------------- as peças, isoladas
+def test_reference_pairs_are_read_uppercased(tmp_path):
+    """Os parsers diferem na caixa: o b2 preserva a do JSON, um FASTA sobe para maiúscula."""
+    reference = _reference(tmp_path, header="e2_alphavirus_consenso")
 
-    Com a ordem trocada o POA1 escrevia ``E2_epitopes.fasta`` — a conservância comparava uma
-    "espécie" que era o nome da proteína.
-    """
-    b2 = _b2_json(tmp_path / "ep.json")
-    args = _args(tmp_path, b2, "E2_ALPHAVIRUS_CONSENSO", swap=True)
-
-    result = pipeline.run_poa1(args)
-    written = sorted(p.name for p in __import__("pathlib").Path(result.conservancy_dir).glob("*"))
-
-    assert any(name.upper().startswith("ALPHAVIRUS") for name in written), written
-    assert not any(name.upper().startswith("E2_") for name in written), written
+    assert pipeline.reference_header_pairs(reference) == {("E2", "ALPHAVIRUS")}
 
 
-def test_the_columns_keep_their_order(tmp_path):
-    """A troca é de conteúdo, não de esquema: o resto do pipeline lê pelas 7 colunas padrão."""
+def test_a_reference_without_a_second_field_yields_no_pairs(tmp_path):
+    """Sem segundo campo não há par, e sem par nada é alinhado — nem para o lado errado."""
+    reference = _reference(tmp_path, header="semseparador")
+
+    assert pipeline.reference_header_pairs(reference) == set()
+
+
+def test_align_reports_how_many_it_moved(tmp_path):
+    """A contagem vai para o log: uma correção silenciosa é indistinguível de nada ter havido."""
+    import pandas as pd
+
     from poa.core.models import STANDARD_COLUMNS
 
-    b2 = _b2_json(tmp_path / "ep.json")
-    args = _args(tmp_path, b2, "E2_ALPHAVIRUS_CONSENSO", swap=True)
+    frame = pd.DataFrame([
+        {"Method": "m", "Specie": "E2", "Protein": "ALPHAVIRUS", "ID_Sequence": "x",
+         "Initial Position": 1, "Final Position": 3, "Peptide Sequence": "MKT"},
+        {"Method": "m", "Specie": "ALPHAVIRUS", "Protein": "E2", "ID_Sequence": "x",
+         "Initial Position": 4, "Final Position": 6, "Peptide Sequence": "AYI"},
+        {"Method": "m", "Specie": "ZIKA", "Protein": "NS1", "ID_Sequence": "x",
+         "Initial Position": 7, "Final Position": 9, "Peptide Sequence": "AKQ"},
+    ])[list(STANDARD_COLUMNS)]
 
-    result = pipeline.run_poa1(args)
+    out, aligned, unresolved = pipeline.align_to_reference(frame, _reference(tmp_path))
 
-    assert list(result.predictions.columns) == list(STANDARD_COLUMNS)
+    assert aligned == 1 and unresolved == 1
+    assert list(out["Specie"]) == ["ALPHAVIRUS", "ALPHAVIRUS", "ZIKA"]
+    assert list(out.columns) == list(STANDARD_COLUMNS)
 
 
-def test_an_empty_result_does_not_break_the_swap(tmp_path):
+def test_an_empty_table_is_returned_unchanged(tmp_path):
     """Nenhum epítopo sobrevivendo aos filtros é caso normal, não erro."""
-    b2 = _b2_json(tmp_path / "ep.json")
-    args = _args(tmp_path, b2, "E2_ALPHAVIRUS_CONSENSO", swap=True)
-    args.bmin = 50          # nenhum epítopo chega a 50 resíduos
+    import pandas as pd
 
-    result = pipeline.run_poa1(args)
+    out, aligned, unresolved = pipeline.align_to_reference(pd.DataFrame(), _reference(tmp_path))
 
-    assert result.predictions.empty
-
-
-def test_the_cli_exposes_the_flag():
-    """A interface e a linha de comando compartilham o core; a opção não pode existir só numa."""
-    from poa.cli.poa1 import build_parser
-
-    args = build_parser().parse_args(["-f", "r.fasta", "-d", "out", "-b2", "x.json", "-swap"])
-    assert args.swap is True
-
-    default = build_parser().parse_args(["-f", "r.fasta", "-d", "out", "-b2", "x.json"])
-    assert default.swap is False
+    assert out.empty and aligned == 0 and unresolved == 0
 
 
 # --------------------------------------------------------------- a prévia da etapa 2
-def test_the_step2_preview_follows_the_declared_order(tmp_path):
+def test_the_step2_preview_shows_the_order_poa1_will_use(tmp_path):
     """
-    A prévia lê o arquivo direto, sem passar pelo POA1 — e precisava ser avisada da inversão.
+    A prévia lê o arquivo direto, sem passar pelo POA1, e precisava da mesma regra.
 
-    Era o sintoma que restava depois de corrigir o pipeline: a etapa 1 concordava com o usuário,
-    e a etapa 2 logo adiante ainda anunciava `Espécies: E2` para uma proteína chamada E2. A prévia
-    existe para flagrar arquivo errado ou convenção ilegível, e mostrar a ordem que o pipeline
-    *não* vai usar trabalha contra isso.
+    Era o sintoma que restava: a etapa 1 concordava com o usuário e a etapa 2 logo adiante ainda
+    anunciava `Espécies: E2` para uma proteína chamada E2.
     """
     b2 = _b2_json(tmp_path / "ep.json")
+    reference = _reference(tmp_path)
 
-    assert backend.summarize_sources({"b2": [b2]}, swap=False)[0].species == ["E2"]
-    assert backend.summarize_sources({"b2": [b2]}, swap=True)[0].species == ["ALPHAVIRUS"]
+    assert backend.summarize_sources({"b2": [b2]})[0].species == ["E2"]
+    assert backend.summarize_sources({"b2": [b2]}, reference=reference)[0].species == ["ALPHAVIRUS"]
 
 
-def test_the_preview_of_a_fasta_follows_the_declared_order(tmp_path):
-    """O mesmo vale para os métodos cujo arquivo é FASTA (-b3, -x), não só para o JSON."""
+def test_the_preview_leaves_a_generated_file_alone(tmp_path):
+    """E não pode inverter o que já está certo — o mesmo erro da inversão em bloco."""
     fasta = tmp_path / "b3.fasta"
-    fasta.write_text(">alphavirus_e2_consenso\nmktAYIAkqrq\n", encoding="utf-8")
+    fasta.write_text(">E2_ALPHAVIRUS_CONSENSO\nmktAYIAkqrq\n", encoding="utf-8")
 
-    plain = backend.summarize_sources({"b3": [str(fasta)]}, swap=False)[0]
-    swapped = backend.summarize_sources({"b3": [str(fasta)]}, swap=True)[0]
+    preview = backend.summarize_sources({"b3": [str(fasta)]}, reference=_reference(tmp_path))[0]
 
-    assert plain.species == ["E2"] and plain.proteins == ["ALPHAVIRUS"]
-    assert swapped.species == ["ALPHAVIRUS"] and swapped.proteins == ["E2"]
-    # a tabela por registro acompanha, não só o agregado
-    assert swapped.rows[0]["Espécie"] == "ALPHAVIRUS"
-    assert swapped.rows[0]["Proteína"] == "E2"
+    assert preview.species == ["ALPHAVIRUS"] and preview.proteins == ["E2"]
+    assert preview.rows[0]["Espécie"] == "ALPHAVIRUS"
+    assert preview.rows[0]["Proteína"] == "E2"
+
+
+def test_one_species_by_two_methods_is_one_file(tmp_path):
+    """
+    Os parsers discordam na caixa, e a etapa 4 nomeia os arquivos por esta coluna.
+
+    O b2 preserva o `alphavirus` do JSON e o PAP/IMED sobe para `ALPHAVIRUS`: a mesma espécie
+    chegando por dois métodos era escrita como dois arquivos, e a conservância comparava cada
+    metade contra um conjunto como se fossem organismos diferentes. Um registro reconhecido no
+    `-f` passa a ser reescrito com a grafia dele, não só com a ordem.
+    """
+    from pathlib import Path
+
+    result = _run(tmp_path, {"b2": _b2_json(tmp_path / "ep.json"),
+                             "p": _pap_txt(tmp_path / "pap.txt")}, _reference(tmp_path))
+    written = sorted(p.name for p in Path(result.conservancy_dir).glob("*_epitopes.fasta"))
+
+    assert written == ["ALPHAVIRUS_epitopes.fasta"], written
+    assert len({str(s) for s in result.predictions["Specie"]}) == 1

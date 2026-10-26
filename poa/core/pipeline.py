@@ -44,6 +44,73 @@ class Poa2Result:
     type_symbol: str
 
 
+# --------------------------------------------------------------------------- header convention
+def reference_header_pairs(fasta_path) -> set:
+    """
+    The ``(PROTEIN, SPECIE)`` pairs the reference declares — this run's ground truth.
+
+    Step 1 is where the user settles which field is which, by the convention or by ticking the
+    inversion; the ``-f`` that comes out of it is therefore the only statement about the pair that
+    the whole run can rely on. Uppercased, because the parsers differ: a BepiPred-2.0 antigen key
+    keeps the case of the JSON while a FASTA header is upper-cased on the way in.
+    """
+    pairs = set()
+    for record in SeqIO.parse(str(fasta_path), "fasta"):
+        fields = str(record.id).upper().split("_")
+        if len(fields) > 1 and fields[0] and fields[1]:
+            pairs.add((fields[0], fields[1]))
+    return pairs
+
+
+def align_to_reference(dataframe, fasta_path):
+    """
+    Put Protein/Specie in the order the reference uses, one record at a time.
+
+    Prediction inputs do not all carry the convention the same way round, and within a single run
+    they can disagree with each other. Files the user uploads carry whatever their source wrote —
+    ``alphavirus_e2_consenso``, species first. Files this app *generates* (EMBOSS antigenic,
+    BepiPred-3.0, the IEDB MHC-II client) are produced **from the already-normalised -f**, so they
+    come out in the convention's order. A blanket swap driven by step 1's checkbox therefore
+    corrected the first kind and broke the second.
+
+    Matching each record against the reference settles it without anyone having to declare
+    anything: ``(protein, specie)`` present in the ``-f`` is already right, the reversed pair is
+    inverted, and a pair that appears in neither order is left untouched — a species absent from
+    the ``-f`` is a problem the species diagnostics already report, and guessing at it here would
+    only make the wrong answer look deliberate.
+
+    Returns ``(dataframe, n_aligned, n_unresolved)``.
+    """
+    if dataframe is None or not len(dataframe):
+        return dataframe, 0, 0
+    pairs = reference_header_pairs(fasta_path)
+    if not pairs:
+        return dataframe, 0, 0
+
+    proteins, species = [], []
+    aligned = unresolved = 0
+    for protein, specie in zip(dataframe["Protein"], dataframe["Specie"]):
+        upper = (str(protein).upper(), str(specie).upper())
+        # A matched record is rewritten with the reference's own spelling, not just its order.
+        # The parsers disagree about case — a BepiPred-2.0 antigen key keeps the JSON's
+        # 'alphavirus' while PAP/IMED upper-cases it — and the per-species FASTAs of step 4 are
+        # named from this column, so one species arriving by two methods was written as two
+        # files, 'alphavirus_epitopes.fasta' and 'ALPHAVIRUS_epitopes.fasta', and the Conservancy
+        # Analysis then compared each half against a set as if they were different organisms.
+        if upper in pairs:
+            proteins.append(upper[0]), species.append(upper[1])
+        elif (upper[1], upper[0]) in pairs:
+            proteins.append(upper[1]), species.append(upper[0])
+            aligned += 1
+        else:
+            proteins.append(protein), species.append(specie)
+            unresolved += 1
+
+    dataframe = dataframe.copy()
+    dataframe["Protein"], dataframe["Specie"] = proteins, species
+    return dataframe, aligned, unresolved
+
+
 # --------------------------------------------------------------------------- helpers
 def _counts(dataframe) -> dict:
     """
@@ -247,22 +314,17 @@ def _run_poa1(args) -> Poa1Result:
         # Organize prediction results
         results_df = consolidate_predictions(args)
 
-        # Headers in Specie_Protein order are corrected here, after every parser has run and
-        # before anything downstream reads the columns. The GUI already rewrote the -f this way,
-        # but nothing touched the predictions, so the two halves of the same run disagreed: a
-        # reference of 'alphavirus_e2_consenso' became protein E2 / species ALPHAVIRUS while the
-        # epitopes from the same string became protein ALPHAVIRUS / species E2, and step 3
-        # reported zero overlap between them.
-        #
-        # One point rather than six: the convention is carried differently by every input — a JSON
-        # antigen key for -b2, a FASTA header for -b3 and -x, a '>ID' line for -p, an identifier
-        # inside the page for -n, and the *file name* for -m. Swapping after consolidation covers
-        # all of them, and the report, the per-species FASTAs, the conservancy and POA2 all read
-        # the corrected values.
-        if getattr(args, "swap", False) and len(results_df):
-            results_df = results_df.rename(columns={"Protein": "Specie", "Specie": "Protein"})
-            results_df = results_df[list(STANDARD_COLUMNS)]
-            run.note("headers read as Specie_Protein: the two first fields were swapped")
+        # Make every prediction agree with the reference about which field is the protein and
+        # which is the species, record by record, after all parsers have run and before anything
+        # downstream reads the columns.
+        results_df, aligned, unresolved = align_to_reference(results_df, args.f)
+        if aligned:
+            run.note("%d epitope(s) had Protein/Specie the other way round and were aligned "
+                     "with the -f", aligned)
+        if unresolved:
+            run.warn("%d epitope(s) name a protein/species pair the -f does not have, in either "
+                     "order; they were left as they came and the Conservancy Analysis will "
+                     "compare them against the wrong set.", unresolved)
 
         # Checking if all epitopes are smaller than proteins in analysis
         report.checkViability(lenght_seq_dict, results_df, "Peptide Sequence")

@@ -650,7 +650,7 @@ def step_inputs():
                       for i, u in enumerate(ups)]
 
     swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `alphavirus_e2`) — "
-                       "inverter os dois primeiros campos **na referência e nas predições**",
+                       "inverter os dois primeiros campos",
                        value=ss.ref_swap, key="ref_swap_cb", help=HELP["swap_headers"])
     ss.ref_swap = swap
 
@@ -733,7 +733,7 @@ def step_inputs():
         export = st.checkbox("Exportar .xlsx por método (-e)", value=ss.params_poa1.get("e", "n") == "y")
 
     ss.params_poa1 = dict(bmin=bmin, bmax=bmax, pmin=pmin, pmax=pmax, xmin=xmin, xmax=xmax,
-                          mhla=mhla, mic=mic, e="y" if export else "n", swap=bool(ss.ref_swap))
+                          mhla=mhla, mic=mic, e="y" if export else "n")
     # Step 1 as it now stands, so reopening this analysis finds it rather than the defaults. The
     # FASTA list is a *selection*: the uploader replaces ss.ref_raw rather than adding to it, and
     # a correction uploaded over an earlier file must not come back beside the file it replaced.
@@ -988,13 +988,13 @@ def _render_source_previews(sources):
                "são extraídos pelo POA1 (etapa 3), com os parâmetros de filtragem da etapa 1 — por "
                "isso aqui aparece o que o arquivo traz, não o que o POA1 vai selecionar.")
 
-    previews = backend.summarize_sources(sources, swap=bool(ss.ref_swap))
+    previews = backend.summarize_sources(sources, reference=ss.proteins_path)
     all_species = sorted({sp for p in previews for sp in p.species})
     if all_species:
         st.info("Espécies encontradas nos arquivos de predição: " + ", ".join(all_species))
-    if ss.ref_swap:
-        st.caption("Proteína e espécie estão sendo lidas na ordem invertida, como você declarou na "
-                   "etapa 1 — é também assim que o POA1 vai interpretá-las.")
+    st.caption("Proteína e espécie são mostradas na ordem que o `-f` da etapa 1 usa, que é como "
+               "o POA1 vai lê-las — mesmo quando o arquivo de predição traz os dois campos na "
+               "ordem contrária.")
 
     for prev in previews:
         unit = {"fasta": "registro(s)", "json": "antígeno(s)",
