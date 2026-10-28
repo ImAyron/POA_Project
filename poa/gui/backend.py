@@ -1310,23 +1310,36 @@ def species_diagnostics(proteins_path: str, predictions: pd.DataFrame) -> Dict[s
     """
     Compare the species found in the predictions with those in the ``-f`` reference set.
 
-    Returns ``{'reference', 'predicted', 'missing_from_reference', 'unpredicted', 'unnamed'}``.
-    ``missing_from_reference`` is the failure mode that silently produces meaningless conservancy
-    results: epitopes of a species whose protein is not in ``-f``.
+    Returns ``{'reference', 'predicted', 'missing_from_reference', 'unpredicted', 'unnamed',
+    'inverted'}``. ``missing_from_reference`` is the failure mode that silently produces
+    meaningless conservancy results: epitopes of a species whose protein is not in ``-f``.
+
+    ``inverted`` names the species POA1 would have aligned and did not — their ``Protein_Specie``
+    is in the ``-f`` the other way round. POA1 aligns every such record before returning, so on a
+    current result the list is always empty; a non-empty one means the table predates that and
+    the run has to be repeated. It is what separates the two reasons the reference and the
+    predictions can end up naming no species in common, which call for opposite advice: re-run
+    the step, or go fix which species the ``-f`` actually holds.
     """
     ref = species_in_fasta(proteins_path) if proteins_path else []
     if predictions is None or predictions.empty or "Specie" not in predictions:
-        predicted, unnamed = [], []
+        predicted, unnamed, inverted = [], [], []
     else:
         col = predictions["Specie"]
         unnamed = ["(sem espécie)"] if col.isna().any() else []
         predicted = sorted({str(v).upper() for v in col.dropna().unique()})
+        pairs = pipeline.reference_header_pairs(proteins_path) if proteins_path else set()
+        inverted = sorted({str(specie).upper()
+                           for protein, specie in zip(predictions.get("Protein", []), col)
+                           if (str(protein).upper(), str(specie).upper()) not in pairs
+                           and (str(specie).upper(), str(protein).upper()) in pairs})
     return {
         "reference": ref,
         "predicted": predicted,
         "missing_from_reference": [sp for sp in predicted if sp not in ref],
         "unpredicted": [sp for sp in ref if sp not in predicted],
         "unnamed": unnamed,
+        "inverted": inverted,
     }
 
 

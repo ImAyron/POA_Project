@@ -649,8 +649,11 @@ def step_inputs():
                                          ctx=ctx, role="reference", original_name=u.name)
                       for i, u in enumerate(ups)]
 
+    # The label says where the inversion lands, because this box settles it for the whole run:
+    # the -f it produces is what POA1 aligns every prediction to. Saying only "inverter os dois
+    # primeiros campos" described a step-1 detail and left the user to guess at the reach.
     swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `alphavirus_e2`) — "
-                       "inverter os dois primeiros campos",
+                       "inverter os dois primeiros campos e usar essa ordem na análise inteira",
                        value=ss.ref_swap, key="ref_swap_cb", help=HELP["swap_headers"])
     ss.ref_swap = swap
 
@@ -1148,21 +1151,26 @@ def step_poa1():
         if diag["unpredicted"]:
             st.warning("Espécies no -f sem nenhum epítopo predito: " + ", ".join(diag["unpredicted"]))
         if diag["reference"] and diag["predicted"] and not set(diag["reference"]) & set(diag["predicted"]):
-            # Which remedy to name depends on whether the inversion is already on: telling someone
-            # to tick a box they ticked is what this message used to do, because the inversion
-            # reached only the -f and the mismatch it produced looked identical to not having
-            # ticked it at all.
-            if ss.ref_swap:
+            # Which remedy to name depends on *why* nothing coincides, and the two reasons ask
+            # for opposite things. Only 'inverted' separates them: POA1 aligns every record whose
+            # pair the -f holds the other way round, so a table still carrying one predates that
+            # and just needs running again. Branching on the checkbox instead — as this message
+            # first did — told a user whose -f genuinely lacks the species to re-run for nothing,
+            # the same shape of wrong remedy the message was rewritten to stop giving.
+            if diag["inverted"]:
                 st.warning(
-                    "Nenhuma espécie do -f coincide com as das predições, **mesmo com a inversão "
-                    "`Espécie_Proteína` marcada**. Execute o POA1 de novo: a inversão passou a ser "
-                    "aplicada também às predições, e este resultado é de uma execução anterior, "
-                    "quando ela valia só para a referência.")
+                    "Nenhuma espécie do -f coincide com as das predições, e " +
+                    ", ".join(diag["inverted"]) + " aparece no -f como **nome de proteína**. "
+                    "Este resultado é de uma execução anterior, de quando a inversão valia só "
+                    "para a referência. Execute o POA1 de novo — ele agora alinha cada epítopo "
+                    "ao `-f`.")
             else:
                 st.warning(
-                    "Nenhuma espécie do -f coincide com as das predições. Verifique na etapa 1 a "
-                    "tabela de leitura dos cabeçalhos — se a coluna Espécie estiver mostrando o "
-                    "nome da proteína, marque a caixa de inversão `Espécie_Proteína`.")
+                    "Nenhuma espécie do -f coincide com as das predições, e **não é a ordem dos "
+                    "campos**: o POA1 já alinha ao `-f` o que vem invertido. As predições nomeiam "
+                    "espécies que o `-f` não tem em nenhuma das duas ordens — confira se os "
+                    "arquivos da etapa 2 são os desta análise e se a etapa 1 traz as proteínas "
+                    "dessas espécies.")
 
         st.subheader("Epítopos consolidados")
         st.dataframe(df, width="stretch", height=320)

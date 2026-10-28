@@ -1,3 +1,59 @@
+# Revisão do alinhamento ao `-f`: três pontas soltas — 28/10/2026
+
+Revisão da correção de 26/10 abaixo. A regra central — comparar cada epítopo com o `-f` em vez de
+inverter por decreto — está certa e os testes a cobrem. Três lugares ficaram de fora dela.
+
+Suíte: de 539 para **544 passando**, no ambiente conda `poa` da WSL. Quatro dos cinco testes novos
+falham sobre o código revisado; o quinto protege a normalização de grafia descrita adiante.
+
+## As planilhas do `-e` não eram alinhadas
+
+O alinhamento acontece sobre a tabela consolidada, em `_run_poa1`. As planilhas por método saem um
+passo antes, dentro de `consolidate_predictions`, então o `-e` era a única saída ainda trazendo a
+ordem que cada parser leu — a planilha contradizendo o relatório e os FASTAs ao lado dela:
+
+```
+predições     : [['E2', 'ALPHAVIRUS']]
+Bepipred.xlsx : [['alphavirus', 'e2']]
+```
+
+O bloco de exportação passa a alinhar cada tabela antes de gravá-la, reaproveitando os pares do
+`-f` já lidos (`align_to_reference` aceita um `pairs` pronto). De passagem, os cinco `to_excel`
+repetidos viraram uma lista e um laço.
+
+## A etapa 3 voltava a indicar o remédio errado
+
+A mensagem nova ramificava em `ss.ref_swap`: com a caixa marcada, dizia que o resultado era de uma
+execução anterior e mandava repetir o POA1. Só que, depois desta correção, uma execução **nova**
+também cai ali — basta a predição nomear um par que o `-f` não tem em nenhuma das duas ordens:
+
+```
+-f = E2_ALPHAVIRUS_CONSENSO, predição = chikv_e2_x  ->  "execute o POA1 de novo"
+```
+
+Repetir não resolve nada: é o mesmo formato de remédio errado que o PR se propôs a eliminar. A
+caixa não sabe responder isso — quem sabe é o dado. `species_diagnostics` passa a devolver
+`inverted`, as espécies cujo par o `-f` tem ao contrário. O POA1 alinha todas antes de retornar,
+então numa tabela atual a lista é sempre vazia; uma lista não vazia significa que a tabela é
+anterior ao alinhamento, e aí repetir **é** o remédio. A etapa 3 ramifica nisso, e no outro caso
+diz o que de fato está errado: o `-f` não contém aquelas espécies.
+
+## A grafia única parava nos registros reconhecidos
+
+Um registro que o `-f` reconhece passa a receber a grafia dele. Um que ele não reconhece ficava
+como veio, e aí ninguém empresta grafia nenhuma: o b2 preserva o `denv1` do JSON, o PAP/IMED sobe
+para `DENV1`, a etapa 4 nomeia os arquivos por essa coluna e grava `denv1_epitopes.fasta` **e**
+`DENV1_epitopes.fasta`.
+
+Num sistema de arquivos indiferente à caixa — o do usuário, Windows — esses dois nomes são **o
+mesmo arquivo**, aberto em `"w"` duas vezes: a segunda espécie apaga os epítopos da primeira, sem
+aviso. É pior do que a divisão em dois conjuntos que o PR descreve; é perda de dados.
+
+Os não reconhecidos passam a ser normalizados pela própria coluna. Vazio e ausente ficam intactos,
+porque é por eles que a etapa 3 relata epítopos sem espécie, e `'NAN'` leria ali como nome.
+
+---
+
 # A inversão `Espécie_Proteína` alcançando as predições — 26/10/2026
 
 Relatado a partir de um caso real: um consenso de E2 de alphavirus, cabeçalho
@@ -66,7 +122,8 @@ PAP gerado    : ordem ja correta na origem
 ## Duas falhas de comunicação, corrigidas junto
 
 - **O rótulo da caixa mentia por omissão:** "Meus cabeçalhos estão em `Espécie_Proteína`", no
-  plural e sem ressalva, agindo em um lugar só. Passa a dizer "na referência e nas predições".
+  plural e sem ressalva, agindo em um lugar só. Passa a dizer que a ordem vale para a análise
+  inteira, e o tooltip explica por quê: é o `-f` saído daqui que o POA1 usa como referência.
 - **O diagnóstico da etapa 3 prescrevia o remédio errado:** mandava marcar a caixa quando ela já
   estava marcada, porque o desencontro que a inversão pela metade produzia era idêntico ao de não
   tê-la marcado. Agora distingue os dois casos.

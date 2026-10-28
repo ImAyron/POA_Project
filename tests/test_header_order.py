@@ -37,8 +37,8 @@ def _reference(tmp_path, header="E2_ALPHAVIRUS_CONSENSO"):
     return str(fasta)
 
 
-def _run(tmp_path, files, reference, name="out"):
-    args = backend.build_poa1_args(files, {}, reference, str(tmp_path / name))
+def _run(tmp_path, files, reference, name="out", params=None):
+    args = backend.build_poa1_args(files, params or {}, reference, str(tmp_path / name))
     return pipeline.run_poa1(args)
 
 
@@ -210,3 +210,99 @@ def test_one_species_by_two_methods_is_one_file(tmp_path):
 
     assert written == ["ALPHAVIRUS_epitopes.fasta"], written
     assert len({str(s) for s in result.predictions["Specie"]}) == 1
+
+
+# --------------------------------------------------------------- o que o alinhamento não cobria
+def test_the_per_method_spreadsheets_are_aligned_too(tmp_path):
+    """
+    O `-e` grava uma planilha por método, e elas saem de `consolidate_predictions`.
+
+    O alinhamento acontece um passo depois, sobre a tabela consolidada, então a exportação era a
+    única saída ainda trazendo a ordem que o parser leu: a planilha dizia `alphavirus`/`e2`
+    enquanto o relatório e os FASTAs ao lado diziam `E2`/`ALPHAVIRUS`.
+    """
+    import pandas as pd
+
+    result = _run(tmp_path, {"b2": _b2_json(tmp_path / "ep.json")}, _reference(tmp_path),
+                  params={"e": "y"})
+    exported = pd.read_excel(tmp_path / "out" / "Bepipred_Epitopes.xlsx")
+
+    assert set(result.predictions["Specie"]) == {"ALPHAVIRUS"}
+    assert set(exported["Specie"]) == {"ALPHAVIRUS"}
+    assert set(exported["Protein"]) == {"E2"}
+
+
+def test_an_unknown_species_by_two_methods_is_still_one_file(tmp_path):
+    """
+    A colisão de caixa também atinge quem o `-f` não reconhece, e aí ninguém empresta a grafia.
+
+    O b2 preserva o `denv1` do JSON e o PAP/IMED sobe para `DENV1`. Como o `-f` não tem o par em
+    nenhuma ordem, nenhum dos dois era reescrito, e a etapa 4 gravava `denv1_epitopes.fasta` e
+    `DENV1_epitopes.fasta` — que num sistema de arquivos indiferente à caixa são **o mesmo
+    arquivo**, aberto em `"w"` duas vezes: a segunda espécie apaga os epítopos da primeira.
+    """
+    from pathlib import Path
+
+    result = _run(tmp_path, {"b2": _b2_json(tmp_path / "ep.json", key="ns1_denv1_ref"),
+                             "p": _pap_txt(tmp_path / "pap.txt", header="NS1_DENV1_REF")},
+                  _reference(tmp_path))
+    written = sorted(p.name for p in Path(result.conservancy_dir).glob("*_epitopes.fasta"))
+
+    assert len(result.predictions) > 1, "os dois métodos precisam ter contribuído"
+    assert written == ["DENV1_epitopes.fasta"], written
+    # Nenhum epítopo pode ter sido sobrescrito: o arquivo traz os dois métodos.
+    records = Path(result.conservancy_dir, written[0]).read_text(encoding="utf-8")
+    assert records.count(">") == len(result.predictions), records
+
+
+def test_a_blank_species_is_not_spelled_into_one(tmp_path):
+    """Normalizar a grafia não pode inventar `'NAN'`: a etapa 3 lê esta coluna para dizer que falta."""
+    import pandas as pd
+
+    from poa.core.models import STANDARD_COLUMNS
+
+    frame = pd.DataFrame([
+        {"Method": "m", "Specie": None, "Protein": "", "ID_Sequence": "x",
+         "Initial Position": 1, "Final Position": 3, "Peptide Sequence": "MKT"},
+    ])[list(STANDARD_COLUMNS)]
+
+    out, _, unresolved = pipeline.align_to_reference(frame, _reference(tmp_path))
+
+    assert unresolved == 1
+    assert out["Specie"].isna().all(), list(out["Specie"])
+    assert list(out["Protein"]) == [""]
+
+
+# --------------------------------------------------------------- o remédio que a etapa 3 indica
+def test_a_current_result_is_never_reported_as_inverted(tmp_path):
+    """
+    `inverted` é o que separa os dois motivos para `-f` e predições não coincidirem.
+
+    Numa execução atual o POA1 já alinhou tudo que o `-f` tinha ao contrário, então a lista sai
+    vazia mesmo quando o par não foi reconhecido — e a etapa 3 não manda repetir o que repetir
+    não resolve.
+    """
+    reference = _reference(tmp_path)
+    result = _run(tmp_path, {"b2": _b2_json(tmp_path / "ep.json", key="ns1_denv1_ref")}, reference)
+
+    diag = backend.species_diagnostics(reference, result.predictions)
+
+    assert diag["predicted"] == ["DENV1"]
+    assert diag["missing_from_reference"] == ["DENV1"], diag
+    assert diag["inverted"] == [], diag
+
+
+def test_a_table_from_before_the_alignment_is_reported_as_inverted(tmp_path):
+    """O caso em que repetir o POA1 **é** o remédio: a tabela é anterior ao alinhamento."""
+    import pandas as pd
+
+    from poa.core.models import STANDARD_COLUMNS
+
+    stale = pd.DataFrame([
+        {"Method": "m", "Specie": "E2", "Protein": "ALPHAVIRUS", "ID_Sequence": "x",
+         "Initial Position": 1, "Final Position": 3, "Peptide Sequence": "MKT"},
+    ])[list(STANDARD_COLUMNS)]
+
+    diag = backend.species_diagnostics(_reference(tmp_path), stale)
+
+    assert diag["inverted"] == ["E2"], diag

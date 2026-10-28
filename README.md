@@ -198,7 +198,15 @@ Revisão de código, correções e melhorias propostas: [`REVISAO.md`](REVISAO.m
 > gerado. Uma inversão em bloco corrigia o primeiro e estragava o segundo.
 >
 > Um registro reconhecido também recebe a **grafia** do `-f`: os parsers discordam na caixa, e a
-> mesma espécie chegando por dois métodos era gravada como dois arquivos na etapa 4.
+> mesma espécie chegando por dois métodos era gravada como dois arquivos na etapa 4. Um registro
+> que o `-f` **não** reconhece não tem de quem herdar grafia, então é normalizado pela própria
+> coluna — sem isso, `denv1_epitopes.fasta` e `DENV1_epitopes.fasta` são o mesmo arquivo no
+> Windows, e a segunda espécie apagava os epítopos da primeira.
+>
+> As planilhas por método (`-e`) também saem alinhadas; antes eram a única saída ainda trazendo a
+> ordem que o parser leu. E o diagnóstico da etapa 3 só manda repetir o POA1 quando repetir
+> resolve — quando a tabela é anterior ao alinhamento. Se o `-f` simplesmente não tem aquelas
+> espécies, ele diz isso. Coberto por `tests/test_header_order.py`.
 
 > **Cabeçalhos fora da convenção (corrigido):** se o JSON do BepiPred-2.0 traz várias espécies em
 > um só arquivo (chaves como `denv1`/`denv2`, sem proteína nem ID) ou se o `-f` usa
