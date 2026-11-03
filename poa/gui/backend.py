@@ -1059,8 +1059,16 @@ class SourcePreview:
     notes: List[str] = field(default_factory=list)
 
 
-def summarize_source(path: str, key: str) -> SourcePreview:
-    """Describe one prediction file (see :class:`SourcePreview`); ``key`` is the POA1 method."""
+def summarize_source(path: str, key: str, reference_pairs: Optional[set] = None) -> SourcePreview:
+    """
+    Describe one prediction file (see :class:`SourcePreview`); ``key`` is the POA1 method.
+
+    ``reference_pairs`` are the ``(PROTEIN, SPECIE)`` pairs of the ``-f``. The preview reads the
+    file directly rather than through POA1, so without them it reported each field in the file's
+    own order — and a user who had settled the convention in step 1 still read "Espécies: E2"
+    here for a protein called E2. Shown the way POA1 will read it, which is what the preview is
+    for: catching the wrong file, not rehearsing the order its source happened to use.
+    """
     label, kind = _SOURCE_KINDS.get(key, (key, "text"))
     target = Path(path)
     preview = SourcePreview(label=label, name=target.name, kind=kind,
@@ -1081,6 +1089,9 @@ def summarize_source(path: str, key: str) -> SourcePreview:
 
     if kind == "fasta":
         records = parse_fasta_headers(str(target))
+        for row in records:
+            row["protein"], row["specie"] = _oriented(row["protein"], row["specie"],
+                                                      reference_pairs)
         preview.n_records = len(records)
         preview.species = sorted({r["specie"] for r in records if r["specie"]})
         preview.proteins = sorted({r["protein"] for r in records if r["protein"]})
@@ -1103,8 +1114,12 @@ def summarize_source(path: str, key: str) -> SourcePreview:
             return preview
         preview.n_records = len(keys)
         preview.rows = [{"Antígeno": k, "Convenção": "❌" if k in bad else "✅"} for k in keys]
-        preview.species = sorted({str(k).upper().split("_")[1] for k in keys
-                                  if len(str(k).split("_")) > 1})
+        species = set()
+        for key_name in keys:
+            fields = str(key_name).upper().split("_")
+            if len(fields) > 1:
+                species.add(_oriented(fields[0], fields[1], reference_pairs)[1])
+        preview.species = sorted(species)
         if bad:
             preview.notes.append(
                 "Antígeno(s) fora da convenção `Proteína_Espécie_ID`: " + ", ".join(map(str, bad))
@@ -1118,9 +1133,23 @@ def summarize_source(path: str, key: str) -> SourcePreview:
     return preview
 
 
-def summarize_sources(sources: Dict[str, List[str]]) -> List[SourcePreview]:
+def _oriented(protein: str, specie: str, pairs: Optional[set]):
+    """``(protein, specie)`` the way the ``-f`` has them; unchanged when it has neither order."""
+    if not pairs:
+        return protein, specie
+    upper = (str(protein).upper(), str(specie).upper())
+    if upper in pairs:
+        return protein, specie
+    if (upper[1], upper[0]) in pairs:
+        return specie, protein
+    return protein, specie
+
+
+def summarize_sources(sources: Dict[str, List[str]],
+                      reference: Optional[str] = None) -> List[SourcePreview]:
     """Describe every collected prediction input, in method order."""
-    return [summarize_source(path, key)
+    pairs = pipeline.reference_header_pairs(reference) if reference else None
+    return [summarize_source(path, key, pairs)
             for key in sorted(sources) for path in sources[key]]
 
 
@@ -1281,23 +1310,36 @@ def species_diagnostics(proteins_path: str, predictions: pd.DataFrame) -> Dict[s
     """
     Compare the species found in the predictions with those in the ``-f`` reference set.
 
-    Returns ``{'reference', 'predicted', 'missing_from_reference', 'unpredicted', 'unnamed'}``.
-    ``missing_from_reference`` is the failure mode that silently produces meaningless conservancy
-    results: epitopes of a species whose protein is not in ``-f``.
+    Returns ``{'reference', 'predicted', 'missing_from_reference', 'unpredicted', 'unnamed',
+    'inverted'}``. ``missing_from_reference`` is the failure mode that silently produces
+    meaningless conservancy results: epitopes of a species whose protein is not in ``-f``.
+
+    ``inverted`` names the species POA1 would have aligned and did not — their ``Protein_Specie``
+    is in the ``-f`` the other way round. POA1 aligns every such record before returning, so on a
+    current result the list is always empty; a non-empty one means the table predates that and
+    the run has to be repeated. It is what separates the two reasons the reference and the
+    predictions can end up naming no species in common, which call for opposite advice: re-run
+    the step, or go fix which species the ``-f`` actually holds.
     """
     ref = species_in_fasta(proteins_path) if proteins_path else []
     if predictions is None or predictions.empty or "Specie" not in predictions:
-        predicted, unnamed = [], []
+        predicted, unnamed, inverted = [], [], []
     else:
         col = predictions["Specie"]
         unnamed = ["(sem espécie)"] if col.isna().any() else []
         predicted = sorted({str(v).upper() for v in col.dropna().unique()})
+        pairs = pipeline.reference_header_pairs(proteins_path) if proteins_path else set()
+        inverted = sorted({str(specie).upper()
+                           for protein, specie in zip(predictions.get("Protein", []), col)
+                           if (str(protein).upper(), str(specie).upper()) not in pairs
+                           and (str(specie).upper(), str(protein).upper()) in pairs})
     return {
         "reference": ref,
         "predicted": predicted,
         "missing_from_reference": [sp for sp in predicted if sp not in ref],
         "unpredicted": [sp for sp in ref if sp not in predicted],
         "unnamed": unnamed,
+        "inverted": inverted,
     }
 
 

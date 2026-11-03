@@ -649,9 +649,12 @@ def step_inputs():
                                          ctx=ctx, role="reference", original_name=u.name)
                       for i, u in enumerate(ups)]
 
-    swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `denv1_ns1`) — inverter "
-                       "os dois primeiros campos", value=ss.ref_swap, key="ref_swap_cb",
-                       help=HELP["swap_headers"])
+    # The label says where the inversion lands, because this box settles it for the whole run:
+    # the -f it produces is what POA1 aligns every prediction to. Saying only "inverter os dois
+    # primeiros campos" described a step-1 detail and left the user to guess at the reach.
+    swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `alphavirus_e2`) — "
+                       "inverter os dois primeiros campos e usar essa ordem na análise inteira",
+                       value=ss.ref_swap, key="ref_swap_cb", help=HELP["swap_headers"])
     ss.ref_swap = swap
 
     if ss.ref_raw:
@@ -984,14 +987,17 @@ def _render_source_previews(sources):
     this the first sign of either was an empty or mis-grouped table two steps later.
     """
     st.subheader("Conteúdo dos arquivos enviados")
-    st.caption("Este é o **conteúdo bruto** de cada arquivo, lido do próprio arquivo. Os epítopos "
-               "em si são extraídos pelo POA1 (etapa 3), com os parâmetros de filtragem da etapa 1 "
-               "— por isso aqui aparece o que o arquivo traz, não o que o POA1 vai selecionar.")
+    st.caption("Este é o **conteúdo** de cada arquivo, lido do próprio arquivo. Os epítopos em si "
+               "são extraídos pelo POA1 (etapa 3), com os parâmetros de filtragem da etapa 1 — por "
+               "isso aqui aparece o que o arquivo traz, não o que o POA1 vai selecionar.")
 
-    previews = backend.summarize_sources(sources)
+    previews = backend.summarize_sources(sources, reference=ss.proteins_path)
     all_species = sorted({sp for p in previews for sp in p.species})
     if all_species:
         st.info("Espécies encontradas nos arquivos de predição: " + ", ".join(all_species))
+    st.caption("Proteína e espécie são mostradas na ordem que o `-f` da etapa 1 usa, que é como "
+               "o POA1 vai lê-las — mesmo quando o arquivo de predição traz os dois campos na "
+               "ordem contrária.")
 
     for prev in previews:
         unit = {"fasta": "registro(s)", "json": "antígeno(s)",
@@ -1145,9 +1151,26 @@ def step_poa1():
         if diag["unpredicted"]:
             st.warning("Espécies no -f sem nenhum epítopo predito: " + ", ".join(diag["unpredicted"]))
         if diag["reference"] and diag["predicted"] and not set(diag["reference"]) & set(diag["predicted"]):
-            st.warning("Nenhuma espécie do -f coincide com as das predições. Verifique na etapa 1 a "
-                       "tabela de leitura dos cabeçalhos — se a coluna Espécie estiver mostrando o "
-                       "nome da proteína, marque a caixa de inversão `Espécie_Proteína`.")
+            # Which remedy to name depends on *why* nothing coincides, and the two reasons ask
+            # for opposite things. Only 'inverted' separates them: POA1 aligns every record whose
+            # pair the -f holds the other way round, so a table still carrying one predates that
+            # and just needs running again. Branching on the checkbox instead — as this message
+            # first did — told a user whose -f genuinely lacks the species to re-run for nothing,
+            # the same shape of wrong remedy the message was rewritten to stop giving.
+            if diag["inverted"]:
+                st.warning(
+                    "Nenhuma espécie do -f coincide com as das predições, e " +
+                    ", ".join(diag["inverted"]) + " aparece no -f como **nome de proteína**. "
+                    "Este resultado é de uma execução anterior, de quando a inversão valia só "
+                    "para a referência. Execute o POA1 de novo — ele agora alinha cada epítopo "
+                    "ao `-f`.")
+            else:
+                st.warning(
+                    "Nenhuma espécie do -f coincide com as das predições, e **não é a ordem dos "
+                    "campos**: o POA1 já alinha ao `-f` o que vem invertido. As predições nomeiam "
+                    "espécies que o `-f` não tem em nenhuma das duas ordens — confira se os "
+                    "arquivos da etapa 2 são os desta análise e se a etapa 1 traz as proteínas "
+                    "dessas espécies.")
 
         st.subheader("Epítopos consolidados")
         st.dataframe(df, width="stretch", height=320)

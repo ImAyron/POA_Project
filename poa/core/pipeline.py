@@ -44,6 +44,93 @@ class Poa2Result:
     type_symbol: str
 
 
+# --------------------------------------------------------------------------- header convention
+def reference_header_pairs(fasta_path) -> set:
+    """
+    The ``(PROTEIN, SPECIE)`` pairs the reference declares — this run's ground truth.
+
+    Step 1 is where the user settles which field is which, by the convention or by ticking the
+    inversion; the ``-f`` that comes out of it is therefore the only statement about the pair that
+    the whole run can rely on. Uppercased, because the parsers differ: a BepiPred-2.0 antigen key
+    keeps the case of the JSON while a FASTA header is upper-cased on the way in.
+    """
+    pairs = set()
+    for record in SeqIO.parse(str(fasta_path), "fasta"):
+        fields = str(record.id).upper().split("_")
+        if len(fields) > 1 and fields[0] and fields[1]:
+            pairs.add((fields[0], fields[1]))
+    return pairs
+
+
+def _one_spelling(value):
+    """
+    A field that names something, upper-cased; a blank or a missing value exactly as it came.
+
+    Blanks are left alone on purpose: ``species_diagnostics`` reads this column to report the
+    epitopes that carry no species at all, and ``'NAN'`` would read there as a species name.
+    """
+    if value is None or pd.isna(value) or not str(value).strip():
+        return value
+    return str(value).upper()
+
+
+def align_to_reference(dataframe, fasta_path, pairs=None):
+    """
+    Put Protein/Specie in the order the reference uses, one record at a time.
+
+    Prediction inputs do not all carry the convention the same way round, and within a single run
+    they can disagree with each other. Files the user uploads carry whatever their source wrote —
+    ``alphavirus_e2_consenso``, species first. Files this app *generates* (EMBOSS antigenic,
+    BepiPred-3.0, the IEDB MHC-II client) are produced **from the already-normalised -f**, so they
+    come out in the convention's order. A blanket swap driven by step 1's checkbox therefore
+    corrected the first kind and broke the second.
+
+    Matching each record against the reference settles it without anyone having to declare
+    anything: ``(protein, specie)`` present in the ``-f`` is already right, the reversed pair is
+    inverted, and a pair that appears in neither order is left untouched — a species absent from
+    the ``-f`` is a problem the species diagnostics already report, and guessing at it here would
+    only make the wrong answer look deliberate.
+
+    Pass ``pairs`` to reuse a set :func:`reference_header_pairs` already produced, when several
+    tables of one run are aligned against the same ``-f``.
+
+    Returns ``(dataframe, n_aligned, n_unresolved)``.
+    """
+    if dataframe is None or not len(dataframe):
+        return dataframe, 0, 0
+    pairs = reference_header_pairs(fasta_path) if pairs is None else pairs
+    if not pairs:
+        return dataframe, 0, 0
+
+    proteins, species = [], []
+    aligned = unresolved = 0
+    for protein, specie in zip(dataframe["Protein"], dataframe["Specie"]):
+        upper = (str(protein).upper(), str(specie).upper())
+        # A matched record is rewritten with the reference's own spelling, not just its order.
+        # The parsers disagree about case — a BepiPred-2.0 antigen key keeps the JSON's
+        # 'alphavirus' while PAP/IMED upper-cases it — and the per-species FASTAs of step 4 are
+        # named from this column, so one species arriving by two methods was written as two
+        # files, 'alphavirus_epitopes.fasta' and 'ALPHAVIRUS_epitopes.fasta', and the Conservancy
+        # Analysis then compared each half against a set as if they were different organisms.
+        if upper in pairs:
+            proteins.append(upper[0]), species.append(upper[1])
+        elif (upper[1], upper[0]) in pairs:
+            proteins.append(upper[1]), species.append(upper[0])
+            aligned += 1
+        else:
+            # An unmatched record keeps its own names, but not its own spelling. The reference
+            # cannot lend one here, so the column does: two methods bringing the same unknown
+            # species in different case still produced two per-species FASTAs, and on a
+            # case-insensitive filesystem the second one *truncates* the first — the collision
+            # above, minus the overwrite, because there the reference settles the spelling.
+            proteins.append(_one_spelling(protein)), species.append(_one_spelling(specie))
+            unresolved += 1
+
+    dataframe = dataframe.copy()
+    dataframe["Protein"], dataframe["Specie"] = proteins, species
+    return dataframe, aligned, unresolved
+
+
 # --------------------------------------------------------------------------- helpers
 def _counts(dataframe) -> dict:
     """
@@ -171,18 +258,27 @@ def consolidate_predictions(args) -> pd.DataFrame:
     for prediction in predictions:
         df_predictions = pd.concat([df_predictions, prediction], join="inner")
 
-    # Save results to Excel files if requested
+    # Save results to Excel files if requested. These hold the same records as the consolidated
+    # table, so they state the same convention: each is aligned to the -f before it is written.
+    # They are produced here, one step before the consolidated table is aligned, so without this
+    # '-e' was the one output still reporting whatever field order its parser happened to read —
+    # the per-method spreadsheet contradicting the report and the FASTAs beside it.
     if (args.e).lower() == "y":
+        pairs = reference_header_pairs(args.f) if getattr(args, "f", "") else set()
+        exports = []
         if args.b2 != "" or args.b3 != "":
-            Bp_df.to_excel(rf"{args.d}/Bepipred_Epitopes.xlsx", sheet_name="Prediction Results", startcol=0, index=False)
+            exports.append((Bp_df, "Bepipred_Epitopes"))
         if args.p != "":
-            PAP_df.to_excel(rf"{args.d}/PAP_IMED_Epitopes.xlsx", sheet_name="Prediction Results", startcol=0, index=False)
+            exports.append((PAP_df, "PAP_IMED_Epitopes"))
         if args.n != "":
-            NetCTL_df.to_excel(rf"{args.d}/NetCTL_Epitopes.xlsx", sheet_name="Prediction Results", startcol=0, index=False)
+            exports.append((NetCTL_df, "NetCTL_Epitopes"))
         if args.m != "":
-            MHCII_df.to_excel(rf"{args.d}/MHCII-BP_Epitopes.xlsx", sheet_name="Prediction Results", startcol=0, index=False)
+            exports.append((MHCII_df, "MHCII-BP_Epitopes"))
         if args.x != "":
-            epitopes_df.to_excel(rf"{args.d}/{filename[0]}_Epitopes.xlsx", sheet_name="Prediction Results", startcol=0, index=False)
+            exports.append((epitopes_df, f"{filename[0]}_Epitopes"))
+        for frame, stem in exports:
+            frame, _, _ = align_to_reference(frame, args.f, pairs)
+            frame.to_excel(rf"{args.d}/{stem}.xlsx", sheet_name="Prediction Results", startcol=0, index=False)
 
     return df_predictions
 
@@ -246,6 +342,18 @@ def _run_poa1(args) -> Poa1Result:
 
         # Organize prediction results
         results_df = consolidate_predictions(args)
+
+        # Make every prediction agree with the reference about which field is the protein and
+        # which is the species, record by record, after all parsers have run and before anything
+        # downstream reads the columns.
+        results_df, aligned, unresolved = align_to_reference(results_df, args.f)
+        if aligned:
+            run.note("%d epitope(s) had Protein/Specie the other way round and were aligned "
+                     "with the -f", aligned)
+        if unresolved:
+            run.warn("%d epitope(s) name a protein/species pair the -f does not have, in either "
+                     "order; they were left as they came and the Conservancy Analysis will "
+                     "compare them against the wrong set.", unresolved)
 
         # Checking if all epitopes are smaller than proteins in analysis
         report.checkViability(lenght_seq_dict, results_df, "Peptide Sequence")
