@@ -268,3 +268,31 @@ def test_the_filters_of_step_1_keep_consecutive_changes(results_root):
         at = _checkbox(at, "Exportar .xlsx").set_value(wanted).run()
         assert at.session_state["params_poa1"]["e"] == ("y" if wanted else "n")
     assert not at.exception
+
+
+def test_no_keyless_field_takes_its_default_from_session_state():
+    """
+    The construction that loses changes, refused at the source.
+
+    A keyless input whose arguments read session state is exactly the widget whose identity
+    moves when its own value is stored. Fields mirrored into the state go through ``_field``,
+    which gives them a key and seeds them instead; this fails when one is added the old way.
+    """
+    inputs = {"checkbox", "number_input", "selectbox", "multiselect", "radio", "slider",
+              "text_input", "text_area", "toggle", "select_slider", "date_input"}
+    tree = ast.parse(Path(APP).read_text(encoding="utf-8"))
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "st"
+                and node.func.attr in inputs):
+            continue
+        if any(keyword.arg == "key" for keyword in node.keywords):
+            continue
+        reads_state = any(isinstance(inner, ast.Name) and inner.id in {"ss", "saved"}
+                          for part in list(node.args) + [k.value for k in node.keywords]
+                          for inner in ast.walk(part))
+        if reads_state:
+            offenders.append(f"linha {node.lineno}: st.{node.func.attr}(...)")
+
+    assert not offenders, f"campos sem key lendo o estado da sessão: {offenders}"

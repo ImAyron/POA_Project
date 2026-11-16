@@ -22,6 +22,7 @@ rather than a hidden default.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -556,6 +557,106 @@ def fetch_structure(pdb_id: str) -> str:
     return text
 
 
+def fetch_structure_cif(pdb_id: str) -> str:
+    """
+    Download a structure from RCSB in mmCIF format.
+
+    Every entry has this file; the PDB format cannot hold more than 62 chains or 99,999 atoms,
+    so the largest ones have nothing else. That is what to fall back to when
+    :func:`fetch_structure` fails for an entry that does exist.
+
+    Raises:
+        ServiceUnavailable: the download failed.
+    """
+    text = _get_text(f"{RCSB_FILES}/{pdb_id.upper()}.cif")
+    logger.debug("downloaded %s as mmCIF (%d bytes)", pdb_id, len(text))
+    return text
+
+
+_CIF_TOKEN = re.compile(r"""'(?:[^']|'(?=\S))*'|"(?:[^"]|"(?=\S))*"|\S+""")
+
+
+def _cif_tokens(line: str) -> List[str]:
+    """Split one mmCIF row into its values, honouring quotes."""
+    return [token[1:-1] if len(token) > 1 and token[0] == token[-1] and token[0] in "'\"" else token
+            for token in _CIF_TOKEN.findall(line)]
+
+
+def _cif_item(lines: Sequence[str], name: str) -> str:
+    """
+    The value of one mmCIF item — the first row's, when the item is a column of a table.
+
+    Covers the three ways a value is written: after the name on the same line, on the following
+    line, or as a ``;``-delimited block. ``?`` and ``.`` are mmCIF for "unknown" and "not
+    applicable" and come back as ``''``.
+    """
+    for index, line in enumerate(lines):
+        if not line.startswith(name):
+            continue
+        rest = line[len(name):]
+        if rest and not rest[0].isspace():
+            continue                                  # a longer name that starts the same way
+        value = ""
+        tokens = _cif_tokens(rest)
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        if tokens:
+            value = tokens[0]
+        elif following.startswith(";"):
+            block, cursor = [following[1:]], index + 2
+            while cursor < len(lines) and not lines[cursor].startswith(";"):
+                block.append(lines[cursor])
+                cursor += 1
+            value = " ".join(part.strip() for part in block).strip()
+        else:
+            top = index
+            while top > 0 and lines[top - 1].startswith("_"):
+                top -= 1
+            if top > 0 and lines[top - 1].strip() == "loop_":
+                names, cursor = [], top
+                while cursor < len(lines) and lines[cursor].startswith("_"):
+                    names.append(lines[cursor].split()[0])
+                    cursor += 1
+                row = _cif_tokens(lines[cursor]) if cursor < len(lines) else []
+                value = row[names.index(name)] if len(row) == len(names) else ""
+            elif following and not following.startswith(("_", "#", "loop_")):
+                row = _cif_tokens(following)
+                value = row[0] if row else ""
+        return "" if value in ("?", ".") else value
+    return ""
+
+
+def _cif_summary(text: str) -> Dict[str, str]:
+    """:func:`structure_summary` for an mmCIF file: the same fields, read from its own items."""
+    from ..core import structure_map
+
+    # Everything above the coordinate table. Cut at the first *line* that opens it, not at the
+    # first mention of its name: the revision history of an entry lists '_atom_site.…' items it
+    # changed, a few thousand characters in, and cutting there loses the whole header.
+    head = []
+    for line in text.splitlines():
+        if line.startswith("_atom_site."):
+            break
+        head.append(line)
+    out: Dict[str, str] = {}
+    for field_name, items in (
+            ("title", ("_struct.title",)),
+            ("molecule", ("_entity.pdbx_description",)),
+            ("organism", ("_entity_src_gen.pdbx_gene_src_scientific_name",
+                          "_entity_src_nat.pdbx_organism_scientific",
+                          "_pdbx_entity_src_syn.organism_scientific")),
+            ("method", ("_exptl.method",)),
+            ("resolution", ("_refine.ls_d_res_high", "_em_3d_reconstruction.resolution"))):
+        for item in items:
+            value = _cif_item(head, item)
+            if value:
+                out[field_name] = value.upper() if field_name != "resolution" else f"{value} ANGSTROMS."
+                break
+    chains = sorted(structure_map.residues_by_chain(text))
+    if chains:
+        out["chains"] = ",".join(chains)
+    return out
+
+
 def structure_summary(pdb_text: str) -> Dict[str, str]:
     """
     Read the identity of a structure out of its own header.
@@ -565,12 +666,14 @@ def structure_summary(pdb_text: str) -> Dict[str, str]:
     unrelated protein with no visible symptom.
 
     Args:
-        pdb_text: the contents of a PDB file.
+        pdb_text: the contents of a structure file, PDB or mmCIF.
 
     Returns:
         Whatever of ``title``, ``molecule``, ``organism``, ``method``, ``resolution``,
         ``chains`` could be read. Missing fields are absent from the dict.
     """
+    if "_atom_site." in pdb_text and "data_" in pdb_text[:4096]:
+        return _cif_summary(pdb_text)
     out: Dict[str, str] = {}
     chains = set()
     for line in pdb_text.splitlines():

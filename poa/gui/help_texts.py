@@ -227,10 +227,12 @@ HELP = {
 
     # ----------------------------------------------------------------- step 7: visualization
     "viz_pdb": (
-        "Uma estrutura `.pdb` da proteína escolhida acima, para ver os epítopos sobre ela. "
-        "**Atenção:** a numeração de resíduo do PDB precisa corresponder à posição na sequência "
-        "usada nas predições — estruturas experimentais costumam ter gaps e começar em outro "
-        "resíduo, e nesse caso o destaque sai deslocado."
+        "Uma estrutura da proteína analisada, em formato PDB (`.pdb`) ou mmCIF (`.cif`), para ver "
+        "os epítopos sobre ela. O arquivo é "
+        "guardado na análise e entra na lista de estruturas. A numeração do PDB não precisa "
+        "coincidir com a da sequência das predições — estruturas experimentais costumam ter gaps "
+        "e começar em outro resíduo: as duas sequências são comparadas e as posições, remapeadas. "
+        "Se a estrutura for de outra proteína, o destaque é recusado."
     ),
     "viz_style": (
         "Como a cadeia principal é desenhada. `cartoon` mostra a dobra (hélices e folhas) e é a "
@@ -242,8 +244,60 @@ HELP = {
         "renderização mais lenta."
     ),
     "viz_chain": (
-        "Restringe o destaque a uma cadeia do PDB (ex.: `A`). Deixe vazio para considerar todas. "
-        "Use quando a estrutura tiver várias cópias da proteína e o destaque em todas poluir a "
-        "visualização."
+        "A cadeia do PDB que é comparada com a sequência das predições e onde os epítopos são "
+        "destacados. A lista vem do próprio arquivo. Em `(automática)`, todas as cadeias são "
+        "comparadas e vale a que corresponde à sua proteína — num complexo (antígeno + anticorpo, "
+        "por exemplo) ela nem sempre é a primeira — e o destaque se repete nas cópias dela, como "
+        "as duas metades de um dímero. Escolha uma cadeia para destacar só aquela."
+    ),
+    "viz_structure": (
+        "Qual das estruturas desta análise está no visualizador. Todas as que você enviou ou "
+        "baixou ficam guardadas em `inputs/`, então dá para alternar entre elas — por exemplo, "
+        "ver os mesmos epítopos em duas entradas do PDB da mesma proteína — sem enviar de novo. "
+        "A escolha é lembrada ao reabrir a análise."
+    ),
+    "viz_pdb_id": (
+        "O identificador de quatro caracteres da entrada no PDB (ex.: `6H3X`). O arquivo é "
+        "baixado do RCSB, guardado na análise e passa a aparecer na lista de estruturas. "
+        "Entradas grandes demais para o formato PDB são baixadas em mmCIF."
+    ),
+    "viz_methods": (
+        "Quais métodos de predição entram no destaque. Tirar um método esconde os epítopos que "
+        "só ele previu — útil quando um deles cobre quase a proteína inteira e encobre os demais."
+    ),
+    "viz_color": (
+        "`uma cor por região` dá a cada trecho destacado a sua cor, a mesma do rótulo e da "
+        "legenda. `método de predição` usa as cores do mapa 2D; um trecho previsto por mais de um "
+        "método fica em cinza-escuro. `cor única` pinta tudo de vermelho, como antes."
+    ),
+    "viz_group": (
+        "Junta epítopos que se sobrepõem ou se encostam em uma única região (`R1`, `R2`, …). "
+        "Preditores de janela deslizante produzem centenas de peptídeos quase iguais; agrupados, "
+        "viram os poucos trechos contínuos que de fato se enxergam na estrutura. Desmarque para "
+        "ver cada epítopo como uma região própria (`E1`, `E2`, …)."
+    ),
+    "viz_labels": (
+        "Escreve o nome de cada região sobre a estrutura. Com mais de 40 regiões os rótulos "
+        "começam ocultos para não encobrir a estrutura; o botão `Rótulos` do visualizador liga e "
+        "desliga a qualquer momento."
+    ),
+    "viz_sidechains": (
+        "Desenha também as cadeias laterais dos resíduos destacados, por cima do `cartoon`. "
+        "Mostra para onde cada resíduo do epítopo aponta — para fora ou para o interior."
+    ),
+    "viz_crop": (
+        "Mostra só uma parte da estrutura. `cadeia mapeada` esconde as outras cadeias; "
+        "`intervalo de resíduos` mantém só um trecho, na numeração do arquivo; `regiões "
+        "destacadas e vizinhança` mantém os epítopos e o que estiver em volta deles. Para cortar "
+        "a estrutura em profundidade, use os controles `Corte frontal`/`Corte traseiro` do "
+        "próprio visualizador."
+    ),
+    "viz_crop_range": (
+        "Primeiro e último resíduo a manter, na numeração que o arquivo PDB usa (a mesma da "
+        "coluna `PDB` da tabela de regiões), não na da sequência das predições."
+    ),
+    "viz_crop_radius": (
+        "Distância, em ångströms, em volta das regiões destacadas que continua visível. Resíduos "
+        "são mantidos inteiros. Em 0 ficam só as regiões."
     ),
 }

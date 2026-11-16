@@ -1808,8 +1808,9 @@ def step_viz():
         st.info("Nenhum epítopo selecionado para visualizar.")
         if ss.pdb_path and Path(ss.pdb_path).is_file():
             try:
-                html = viz.build_3dmol_view_html(Path(ss.pdb_path).read_text(encoding="utf-8"), [])
-                _embed_html(html, height=520)
+                html = viz.build_3dmol_view_html(Path(ss.pdb_path).read_text(encoding="utf-8"), [],
+                                                 height=_VIEWER_HEIGHT)
+                _embed_html(html, height=_VIEWER_HEIGHT + 6)
             except Exception as exc:
                 st.error(f"Não foi possível renderizar a estrutura: {exc}")
         return
@@ -1820,127 +1821,330 @@ def step_viz():
                "colorido por método.")
     st.plotly_chart(viz.epitope_map_figure(df), width="stretch")
 
-    # --- 3D structure viewer (upload a PDB) ---
-    st.subheader("Estrutura 3D (envie um PDB)")
-    st.caption("Estilo Discovery Studio: epítopos destacados sobre a estrutura. O visualizador usa "
-               "3Dmol.js (precisa de internet para renderizar).")
+    # --- 3D structure viewer ---
+    st.subheader("Estrutura 3D")
+    st.caption("Estilo Discovery Studio: os epítopos destacados sobre a estrutura, cada região com "
+               "nome, cor e legenda. O visualizador usa 3Dmol.js (precisa de internet para "
+               "renderizar).")
 
+    # The protein comes first: which structures are worth offering depends on it — the search
+    # below asks PDBe about the accession in this track's own reference header.
     saved = ss.params_viz
     tracks = sorted({f"{r.Protein}|{r.Specie}" for r in df.itertuples()})
-    styles = ["cartoon", "stick", "sphere"]
     # The track list depends on the POA1 table, so a remembered choice is only offered back while
     # it still exists; otherwise this would select a protein that is no longer in the results.
-    choice = st.selectbox("Epítopos de qual proteína/espécie destacar?", tracks,
-                          index=tracks.index(saved["track"])
-                          if saved.get("track") in tracks else 0)
+    # The same goes for every list below that depends on the data or on the structure file.
+    s1, s2 = st.columns(2)
+    with s1:
+        choice = _field(st.selectbox, "Epítopos de qual proteína/espécie destacar?", tracks,
+                        record=_among(tracks, saved.get("track")), key="viz_track_w")
+    prot, spec = choice.split("|")
+    on_track = df[(df["Protein"].astype(str) == prot) & (df["Specie"].astype(str) == spec)]
+    methods = sorted(on_track["Method"].astype(str).unique())
+    # A remembered selection belongs to the track it was made on. An *empty* one is still a
+    # selection — only "nothing remembered" falls back to every method — or clearing the list
+    # would refill it on the next interaction.
+    remembered = saved.get("methods") if saved.get("track") == choice else None
+    with s2:
+        picked = _field(
+            st.multiselect, "Métodos de predição a destacar", methods,
+            record=[m for m in remembered if m in methods] if isinstance(remembered, list)
+            else methods,
+            key="viz_methods_w", help=HELP["viz_methods"])
+    # Written back now, not only with the rest of the form further down: the step can return
+    # before it gets there (no structure yet), and a field whose value is not written back is
+    # handed its old record again on the next rerun.
+    ss.params_viz = dict(saved, track=choice, methods=list(picked))
+
+    _structure_picker(choice)
+    if not ss.pdb_path:
+        st.info("Adicione uma estrutura acima — um arquivo `.pdb`/`.cif`, uma entrada do RCSB pelo "
+                "identificador, ou a busca pela proteína — para ver os epítopos destacados na "
+                "estrutura 3D. O POA0 (`--estrutura 6H3X`) também baixa a estrutura certa junto "
+                "com a sequência.")
+        return
+
+    name = Path(ss.pdb_path).name
+    pdb_text = Path(ss.pdb_path).read_text(encoding="utf-8", errors="replace")
+    megabytes = len(pdb_text) / 1e6
+    if megabytes > 20:
+        st.caption(f"Arquivo grande ({megabytes:.0f} MB): o visualizador recebe a estrutura "
+                   "inteira a cada mudança no formulário e pode demorar a responder.")
+    # What the file *is*, before it is used as if it were the antigen. A PDB identifier says
+    # nothing on sight, and an unrelated structure produces a confident, meaningless figure.
+    _show_structure_identity(pdb_text, name)
+    by_chain = structure_map.residues_by_chain(pdb_text)
+    chains = list(by_chain)             # the chains that are protein: waters and ligands have ids too
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        base_style = st.selectbox("Representação", styles,
-                                  index=styles.index(saved.get("style", "cartoon")),
-                                  help=HELP["viz_style"])
+        base_style = _field(st.selectbox, "Representação", list(viz.STYLES),
+                            record=_among(viz.STYLES, saved.get("style")), key="viz_style_w",
+                            help=HELP["viz_style"])
     with c2:
-        surface = st.checkbox("Mostrar superfície", value=bool(saved.get("surface", False)),
-                              help=HELP["viz_surface"])
+        chain = _field(st.selectbox, "Cadeia", [""] + chains,
+                       record=_among([""] + chains, saved.get("chain")), key="viz_chain_w",
+                       format_func=lambda c: c or "(automática)", help=HELP["viz_chain"])
     with c3:
-        chain = st.text_input("Cadeia (opcional)", saved.get("chain", ""),
-                              help=HELP["viz_chain"])
-    ss.params_viz = dict(track=choice, style=base_style, surface=surface, chain=chain)
+        color_by = _field(st.selectbox, "Colorir por", list(_VIZ_COLORS),
+                          record=_among(_VIZ_COLORS, saved.get("color_by")), key="viz_color_w",
+                          format_func=_VIZ_COLORS.get, help=HELP["viz_color"])
 
-    _structure_source(choice)
+    t1, t2, t3, t4 = st.columns(4)
+    with t1:
+        group = _field(st.checkbox, "Agrupar epítopos sobrepostos",
+                       record=bool(saved.get("group", True)), key="viz_group_w",
+                       help=HELP["viz_group"])
+    with t2:
+        labels = _field(st.checkbox, "Rótulos nas regiões",
+                        record=bool(saved.get("labels", True)), key="viz_labels_w",
+                        help=HELP["viz_labels"])
+    with t3:
+        surface = _field(st.checkbox, "Mostrar superfície",
+                         record=bool(saved.get("surface", False)), key="viz_surface_w",
+                         help=HELP["viz_surface"])
+    with t4:
+        side_chains = _field(st.checkbox, "Cadeias laterais dos epítopos",
+                             record=bool(saved.get("side_chains", False)),
+                             key="viz_sidechains_w", help=HELP["viz_sidechains"])
 
-    pdb_up = st.file_uploader("Arquivo .pdb", type=["pdb", "ent"], key="pdb_up",
-                              help=HELP["viz_pdb"])
-    if pdb_up is not None:
-        # An uploader is emptied when its step is not rendered, and this was the one upload read
-        # straight from the widget instead of being saved: leaving step 7 and returning dropped
-        # the structure and the 3D view with it. Saved like every other input and kept by path.
-        ss.pdb_path = backend.save_upload(ctx.inputs_dir, f"structure_{pdb_up.name}",
-                                          pdb_up.getvalue(), ctx=ctx, role="structure",
-                                          original_name=pdb_up.name)
+    # The mapping runs here, before the crop is asked for, because the crop is stated in the
+    # numbering of the chain the mapping settles on — which, with no chain chosen, is whichever
+    # chain of the file turns out to be this protein, not necessarily the first.
+    epitopes = viz.epitope_list(df, protein=prot, specie=spec, methods=picked)
+    reference, refused = None, None
+    try:
+        reference = backend.reference_sequence(ctx, prot, spec, ss.proteins_path)
+    except (ValueError, OSError, KeyError) as exc:
+        refused = str(exc)
+    report, regions, copies, mapping = None, [], [], None
+    if reference is not None:
+        spans = [(e.start, e.end) for e in epitopes]
+        # SIFTS states the correspondence residue by residue; the alignment estimates it. When
+        # POA0 fetched this structure it already recorded the mapping, so it is used — this is
+        # what step 1 has been promising.
+        mapping = backend.structure_mapping(ctx, ss.pdb_path)
+        if mapping:
+            sifts_chain = chain or (mapping["chain"] if mapping["chain"] in chains else "")
+            report = structure_map.map_epitopes(
+                pdb_text, reference["sequence"], spans, chain=sifts_chain or None,
+                sifts_offset=mapping["offset"], sifts_span=mapping["span"])
+            if not report.ok:
+                # The recorded offset is for the region POA0 wrote. Shown against another
+                # reference — a different region of the same protein, say — it does not apply,
+                # and that is a fact about the record, not about the structure: the alignment
+                # gets to answer before the structure is called incompatible.
+                mapping = None
+        if not mapping:
+            if chain:
+                report = structure_map.map_epitopes(pdb_text, reference["sequence"], spans,
+                                                    chain=chain)
+            else:
+                report = structure_map.map_epitopes_best_chain(pdb_text, reference["sequence"],
+                                                               spans)
+        if report.ok and not chain:
+            # Naming a chain means "this one"; leaving it open means "this protein", and a
+            # crystal of a dimer has it twice. Coloring one copy would show half the antigen as
+            # if it had no epitopes.
+            copies = structure_map.chain_copies(pdb_text, report.chain)
+        if report.ok:
+            # Regions are built from the epitopes the structure actually has, each still tied to
+            # the sequence range it came from — that link is what lets a colored stretch be named.
+            regions = viz.build_regions(epitopes, dict(zip(report.sources, report.ranges)),
+                                        merge=group, partial=report.partial,
+                                        sequence=reference["sequence"])
+            viz.color_regions(regions, color_by, viz.method_colors(df["Method"].unique()))
+    shown_chain = report.chain if report is not None else (chain or next(iter(by_chain), ""))
+
+    r1, r2, r3 = st.columns([2, 1, 1])
+    with r1:
+        crop = _field(st.selectbox, "Recorte — o que mostrar da estrutura", list(_VIZ_CROPS),
+                      record=_among(_VIZ_CROPS, saved.get("crop")), key="viz_crop_w",
+                      format_func=_VIZ_CROPS.get, help=HELP["viz_crop"])
+    crop_range = None
+    crop_from, crop_to = saved.get("crop_from"), saved.get("crop_to")
+    crop_for = saved.get("crop_for")
+    crop_radius = saved.get("crop_radius")
+    crop_radius = float(crop_radius) if isinstance(crop_radius, (int, float)) else 8.0
+    if crop == "range":
+        numbers = [r.number for r in by_chain.get(shown_chain, [])]
+        low, high = (min(numbers), max(numbers)) if numbers else (1, 1)
+        # Residue numbers mean something only inside the chain they came from: a range remembered
+        # from another structure, or another chain, is dropped rather than clamped into this one.
+        here = f"{name}:{shown_chain}"
+        mine = crop_for == here
+
+        def within(value, fallback):
+            return min(max(value, low), high) if mine and isinstance(value, int) else fallback
+
+        with r2:
+            crop_from = int(_field(st.number_input, "Do resíduo", min_value=low,
+                                   max_value=high, step=1, record=within(crop_from, low),
+                                   key="viz_crop_from_w", help=HELP["viz_crop_range"]))
+        with r3:
+            crop_to = int(_field(st.number_input, "Até o resíduo", min_value=low,
+                                 max_value=high, step=1, record=within(crop_to, high),
+                                 key="viz_crop_to_w", help=HELP["viz_crop_range"]))
+        crop_range, crop_for = (crop_from, crop_to), here
+    elif crop == "epitopes":
+        with r2:
+            crop_radius = _field(st.slider, "Vizinhança (Å)", 0.0, 20.0, step=1.0,
+                                 record=min(max(crop_radius, 0.0), 20.0),
+                                 key="viz_crop_radius_w", help=HELP["viz_crop_radius"])
+
+    ss.params_viz = dict(track=choice, methods=list(picked), style=base_style, chain=chain,
+                         color_by=color_by, group=group, labels=labels, surface=surface,
+                         side_chains=side_chains, crop=crop, crop_from=crop_from, crop_to=crop_to,
+                         crop_radius=crop_radius, crop_for=crop_for)
+    backend.record_step_state(ctx, params_viz=dict(ss.params_viz))
+
+    if not picked:
+        st.info("Nenhum método selecionado: a estrutura é exibida sem destaque.")
+    if refused is not None:
+        # Refused is not missing. The reference *was* found — in `poa1_out/`, or in several
+        # conflicting copies — and rejected, so sending the user to look for it in `inputs/`
+        # named the wrong folder and the wrong remedy right under the real explanation.
+        st.warning(f"{refused} A estrutura será exibida sem destaque de epítopos.")
+    elif reference is None:
+        st.warning(
+            f"Não encontrei em `{ctx.inputs_dir.name}/` a sequência de referência de "
+            f"`{prot}_{spec}`, então não dá para conferir se esta estrutura é dessa proteína. "
+            f"A estrutura será exibida sem destaque de epítopos.")
+    if mapping:
+        st.caption(f"Numeração resolvida pelo mapeamento **SIFTS** de `{mapping['pdb_id']}` "
+                   "(exato), e não por alinhamento.")
+        if not mapping["covers_region"]:
+            st.warning("A estrutura não cobre toda a região analisada: parte dos epítopos não "
+                       "tem correspondência estrutural.")
+
+    def render(shown_regions):
+        html = viz.build_3dmol_view_html(
+            pdb_text, [(r.pdb_start, r.pdb_end) for r in shown_regions],
+            chain=shown_chain or None, base_style=base_style, show_surface=surface,
+            height=_VIEWER_HEIGHT, regions=shown_regions, copies=copies,
+            show_labels=None if labels else False, side_chains=side_chains, crop=crop,
+            crop_range=crop_range, crop_radius=crop_radius,
+            title=f"{Path(name).stem}_{prot}_{spec}")
+        _embed_html(html, height=_VIEWER_HEIGHT + 6)
+
+    try:
+        if report is not None and not report.ok:
+            # Rendering the structure plain is still useful — what is refused is the claim
+            # that these residues are the epitopes.
+            st.error("**Estrutura incompatível com as predições.** " + report.warnings[0])
+            st.caption(f"Comparação: `{reference['header']}` ({len(reference['sequence'])} aa) "
+                       f"× cadeia {report.chain} de `{name}` "
+                       f"({report.structure_length} resíduos observados).")
+            render([])
+            st.caption("Estrutura exibida sem destaque. Escolha ou adicione acima a estrutura "
+                       "desta proteína, ou gere-a pelo POA0 (`--estrutura`), que busca no RCSB a "
+                       "que corresponde à sequência analisada.")
+        else:
+            render(regions)
+            if report is not None:
+                _describe_regions(report, regions, epitopes, shown_chain, grouped=group,
+                                  labels=labels, track=f"{prot}_{spec}", structure=name,
+                                  copies=copies, highlighting=bool(picked))
+    except Exception as exc:  # noqa: BLE001 - surface the error to the user, don't crash the app
+        st.error(f"Não foi possível renderizar a estrutura: {exc}")
+
+
+#: Height of the 3D viewer page, toolbar and legend included.
+_VIEWER_HEIGHT = 600
+
+_VIZ_COLORS = {"region": "uma cor por região", "method": "método de predição",
+               "single": "cor única (vermelho)"}
+_VIZ_CROPS = {"all": "estrutura inteira", "chain": "só a cadeia mapeada",
+              "range": "um intervalo de resíduos",
+              "epitopes": "só as regiões destacadas e a vizinhança"}
+
+
+def _among(options, value):
+    """A remembered ``value`` if it is still one of today's ``options``; the first option if not."""
+    options = list(options)
+    return value if value in options else options[0]
+
+
+def _same_file(first, second) -> bool:
+    try:
+        return Path(first).samefile(second)
+    except OSError:
+        return False
+
+
+def _structure_picker(track: str) -> None:
+    """
+    Step 7: choose which of the analysis' structures is on screen, or bring in another one.
+
+    The step used to hold exactly one structure, and the only way to change it was to upload over
+    it. Every structure that reaches the analysis is kept under its own name in ``inputs/`` — by
+    upload, by PDB identifier or by the PDBe search here, or by POA0 on step 1 — so this lists
+    them and ``ss.pdb_path`` becomes a *choice* among them. The choice goes into the step state
+    for the same reason step 2's selection does: the record of arrivals knows which file came
+    last, not which one the person went back to.
+    """
     if ss.pdb_path and not Path(ss.pdb_path).is_file():
         ss.pdb_path = None     # the analysis folder was cleaned up under us
 
-    if ss.pdb_path:
-        prot, spec = choice.split("|")
-        ranges = viz.epitope_ranges(df, protein=prot, specie=spec)
-        pdb_text = Path(ss.pdb_path).read_text(encoding="utf-8", errors="replace")
+    selector = st.container()      # shown above the form below, filled in once the form has run
+    with st.expander("➕ Adicionar estrutura (arquivo, identificador do PDB ou busca pela proteína)",
+                     expanded=not ss.pdb_path):
+        by_file, by_id, by_search = st.tabs(
+            ["Enviar arquivo", "Baixar pelo identificador", "Buscar pela proteína"])
+        with by_file:
+            pdb_up = st.file_uploader("Arquivo .pdb ou .cif", type=["pdb", "ent", "cif", "mmcif"],
+                                      key="pdb_up", help=HELP["viz_pdb"])
+            if pdb_up is not None:
+                # An uploader is emptied when its step is not rendered, so the file is saved like
+                # every other input and kept by path. It is adopted *once*: the widget goes on
+                # holding the file for as long as step 7 is on screen, and adopting it on every
+                # rerun would snap the selection back to the upload each time another structure
+                # was picked from the list.
+                arrival = (pdb_up.name, getattr(pdb_up, "size", None),
+                           getattr(pdb_up, "file_id", None))
+                if arrival != ss.pdb_upload_seen:
+                    ss.pdb_path = backend.save_upload(ctx.inputs_dir, f"structure_{pdb_up.name}",
+                                                      pdb_up.getvalue(), ctx=ctx, role="structure",
+                                                      original_name=pdb_up.name)
+                    ss.pdb_upload_seen = arrival
+        with by_id:
+            typed = st.text_input("Identificador do PDB (RCSB)", max_chars=4,
+                                  placeholder="ex.: 6H3X", key="pdb_id_text",
+                                  help=HELP["viz_pdb_id"])
+            wanted = typed.strip().upper()
+            if st.button("⬇️ Baixar do RCSB", disabled=not wanted, key="pdb_id_fetch"):
+                try:
+                    with st.spinner(f"Baixando {wanted} do RCSB…"):
+                        ss.pdb_path = backend.fetch_structure(ctx, wanted)
+                except ValueError as exc:
+                    st.error(str(exc))
+                except (ServiceError, ServiceUnavailable) as exc:
+                    st.error(f"Não foi possível baixar `{wanted}` do RCSB: {exc}")
+        with by_search:
+            _structure_search(track)
 
-        # What the file *is*, before it is used as if it were the antigen. A PDB identifier says
-        # nothing on sight, and an unrelated structure produces a confident, meaningless figure.
-        _show_structure_identity(pdb_text, Path(ss.pdb_path).name)
-
-        reference, refused = None, None
-        try:
-            reference = backend.reference_sequence(ctx, prot, spec, ss.proteins_path)
-        except (ValueError, OSError, KeyError) as exc:
-            refused = str(exc)
-        report = None
-        if refused is not None:
-            # Refused is not missing. The reference *was* found — in `poa1_out/`, or in several
-            # conflicting copies — and rejected, so sending the user to look for it in `inputs/`
-            # named the wrong folder and the wrong remedy right under the real explanation.
-            st.warning(f"{refused} A estrutura será exibida sem destaque de epítopos.")
-            ranges = []
-        elif reference is None:
-            st.warning(
-                f"Não encontrei em `{ctx.inputs_dir.name}/` a sequência de referência de "
-                f"`{prot}_{spec}`, então não dá para conferir se esta estrutura é dessa proteína. "
-                f"A estrutura será exibida sem destaque de epítopos.")
-            ranges = []
-        else:
-            # SIFTS states the correspondence residue by residue; the alignment estimates it.
-            # When POA0 fetched this structure it already recorded the mapping, so use it — this
-            # is what step 1 has been promising, and what nothing read back until now.
-            mapping = backend.structure_mapping(ctx, ss.pdb_path)
-            report = structure_map.map_epitopes(
-                pdb_text, reference["sequence"], ranges, chain=chain or None,
-                sifts_offset=mapping["offset"] if mapping else None,
-                sifts_span=mapping["span"] if mapping else None)
-            ranges = report.ranges
-            chain = report.chain
-            if mapping:
-                st.caption(f"Numeração resolvida pelo mapeamento **SIFTS** de "
-                           f"`{mapping['pdb_id']}` (exato), e não por alinhamento.")
-                if not mapping["covers_region"]:
-                    st.warning("A estrutura não cobre toda a região analisada: parte dos epítopos "
-                               "não tem correspondência estrutural.")
-
-        try:
-            if report is not None and not report.ok:
-                # Rendering the structure plain is still useful — what is refused is the claim
-                # that these residues are the epitopes.
-                st.error("**Estrutura incompatível com as predições.** " + report.warnings[0])
-                st.caption(f"Comparação: `{reference['header']}` ({len(reference['sequence'])} aa) "
-                           f"× cadeia {report.chain} de `{Path(ss.pdb_path).name}` "
-                           f"({report.structure_length} resíduos observados).")
-                html = viz.build_3dmol_view_html(pdb_text, [], chain=chain or None,
-                                                 base_style=base_style, show_surface=surface)
-                _embed_html(html, height=520)
-                st.caption("Estrutura exibida sem destaque. Envie a estrutura desta proteína, "
-                           "ou gere-a pelo POA0 (`--estrutura`), que busca no RCSB a que "
-                           "corresponde à sequência analisada.")
-            else:
-                html = viz.build_3dmol_view_html(pdb_text, ranges, chain=chain or None,
-                                                 base_style=base_style, show_surface=surface)
-                _embed_html(html, height=520)
-                if report is None:
-                    st.caption(f"{len(ranges)} epítopo(s) de {prot}_{spec} destacado(s) em "
-                               f"vermelho (estrutura: `{Path(ss.pdb_path).name}`).")
-                else:
-                    st.success(f"{len(report.ranges)} epítopo(s) de {prot}_{spec} destacado(s) "
-                               f"em vermelho. {report.summary()}")
-                    for warning in report.warnings:
-                        st.warning(warning)
-        except Exception as exc:  # noqa: BLE001 - surface the error to the user, don't crash the app
-            st.error(f"Não foi possível renderizar a estrutura: {exc}")
-    else:
-        st.info("Envie um arquivo .pdb para ver os epítopos destacados na estrutura 3D, "
-                "ou use o POA0 (`--estrutura 6H3X`) para baixar a estrutura certa do RCSB.")
+    files = backend.structure_files(ctx)
+    if ss.pdb_path and not any(_same_file(ss.pdb_path, path) for path in files):
+        files.append(ss.pdb_path)       # put in the session by a caller that recorded nothing
+    if not files:
+        return
+    current = next((path for path in files if ss.pdb_path and _same_file(path, ss.pdb_path)),
+                   files[-1])
+    with selector:
+        chosen = _field(st.selectbox, "Estrutura em uso", files, record=current,
+                        key="viz_structure_w",
+                        format_func=lambda path: Path(path).name.removeprefix("structure_"),
+                        help=HELP["viz_structure"])
+        if len(files) > 1:
+            st.caption(f"{len(files)} estruturas nesta análise — troque aqui para ver os mesmos "
+                       "epítopos em outra.")
+    ss.pdb_path = chosen
+    backend.record_step_state(ctx, structure=chosen)
 
 
-def _structure_source(track: str) -> None:
+def _structure_search(track: str) -> None:
     """
-    Offer the RCSB alongside the upload, so the structure does not have to be fetched by hand.
+    Ask PDBe which entries cover this protein, so the structure need not be looked up by hand.
 
     Everything needed already exists — ``list_structures`` asks PDBe which entries cover a
     UniProt accession, ``fetch_structure`` downloads the file from RCSB — but only step 1's POA0
@@ -1949,59 +2153,97 @@ def _structure_source(track: str) -> None:
     file.
 
     The accession comes from the reference's own header; without one this says so and leaves the
-    upload as the way in, rather than searching for something it cannot identify.
+    other two ways in, rather than searching for something it cannot identify.
     """
     accession = backend.accession_from_header(track, ss.proteins_path)
-    with st.expander("🔎 Buscar a estrutura no RCSB (em vez de enviar o arquivo)",
-                     expanded=not bool(ss.pdb_path)):
-        if not accession:
-            st.caption(
-                f"A referência de `{track.replace('|', '_')}` não traz um accession do UniProt no "
-                "terceiro campo do cabeçalho (ex.: `NS1_DENV1_P29990`), então não há o que "
-                "perguntar ao PDBe. Envie o arquivo abaixo, ou gere a referência pelo POA0, que "
-                "escreve o accession no cabeçalho e já oferece as estruturas.")
-            return
+    if not accession:
+        st.caption(
+            f"A referência de `{track.replace('|', '_')}` não traz um accession do UniProt no "
+            "terceiro campo do cabeçalho (ex.: `NS1_DENV1_P29990`), então não há o que perguntar "
+            "ao PDBe. Envie o arquivo, baixe pelo identificador, ou gere a referência pelo POA0, "
+            "que escreve o accession no cabeçalho e já oferece as estruturas.")
+        return
 
-        st.caption(f"Accession lido do cabeçalho: **{accession}**. O PDBe responde quais entradas "
-                   "do PDB cobrem essa sequência; o arquivo vem do RCSB.")
-        if st.button("Buscar estruturas", key="viz_search_struct"):
-            with st.status("Consultando o PDBe…") as status:
-                try:
-                    ss.viz_structures = database_client.list_structures(accession, limit=15)
-                    status.update(label=f"{len(ss.viz_structures)} estrutura(s).", state="complete")
-                except (ServiceError, ServiceUnavailable) as exc:
-                    status.update(label="Consulta falhou.", state="error")
-                    st.error(f"{exc} O upload manual continua disponível.")
-                    return
-            if not ss.viz_structures:
-                st.warning(f"O PDBe não conhece estrutura para {accession}.")
-
+    st.caption(f"Accession lido do cabeçalho: **{accession}**. O PDBe responde quais entradas "
+               "do PDB cobrem essa sequência; o arquivo vem do RCSB.")
+    if st.button("Buscar estruturas", key="viz_search_struct"):
+        with st.status("Consultando o PDBe…") as status:
+            try:
+                ss.viz_structures = database_client.list_structures(accession, limit=15)
+                ss.viz_structures_for = accession
+                status.update(label=f"{len(ss.viz_structures)} estrutura(s).", state="complete")
+            except (ServiceError, ServiceUnavailable) as exc:
+                status.update(label="Consulta falhou.", state="error")
+                st.error(f"{exc} As outras duas formas de adicionar continuam disponíveis.")
+                return
         if not ss.viz_structures:
-            return
-        labels = [str(s) for s in ss.viz_structures]
-        picked = st.selectbox("Estruturas que cobrem esta proteína", range(len(labels)),
-                              format_func=lambda i: labels[i], key="viz_struct_pick")
-        chosen = ss.viz_structures[picked]
-        if st.button("⬇️ Baixar e usar esta estrutura", type="primary", key="viz_fetch_struct"):
-            with st.status(f"Baixando {chosen.pdb_id} do RCSB…") as status:
-                try:
-                    text = database_client.fetch_structure(chosen.pdb_id)
-                except (ServiceError, ServiceUnavailable) as exc:
-                    status.update(label="Download falhou.", state="error")
-                    st.error(f"{exc} Estruturas muito grandes existem só como mmCIF; nesse caso "
-                             "baixe do site e envie o arquivo.")
-                    return
-                ss.pdb_path = backend.save_upload(
-                    ctx.inputs_dir, f"structure_{chosen.pdb_id}.pdb", text.encode("utf-8"),
-                    ctx=ctx, role="structure", original_name=f"{chosen.pdb_id}.pdb")
-                status.update(label=f"{chosen.pdb_id} baixada.", state="complete")
-            # Downloaded here, the numbering is still resolved by alignment: the exact SIFTS
-            # offset depends on which part of the sequence the reference covers, and only POA0
-            # records that. Said plainly rather than implied, since the difference is exactness.
-            st.info("Estrutura baixada e carregada. A numeração será conferida por alinhamento "
-                    "com a referência — para o mapeamento SIFTS exato, gere a referência e a "
-                    "estrutura juntas pelo POA0 na etapa 1.")
-            st.rerun()
+            st.warning(f"O PDBe não conhece estrutura para {accession}.")
+
+    # A listing answers the accession it was asked about. Kept on screen after the protein above
+    # changed, it offered the previous protein's structures under the new protein's name.
+    if not ss.viz_structures or ss.viz_structures_for != accession:
+        return
+    labels = [str(s) for s in ss.viz_structures]
+    picked = st.selectbox("Estruturas que cobrem esta proteína", range(len(labels)),
+                          format_func=lambda i: labels[i], key="viz_struct_pick")
+    chosen = ss.viz_structures[picked]
+    if st.button("⬇️ Baixar e usar esta estrutura", type="primary", key="viz_fetch_struct"):
+        with st.status(f"Baixando {chosen.pdb_id} do RCSB…") as status:
+            try:
+                ss.pdb_path = backend.fetch_structure(ctx, chosen.pdb_id)
+            except (ValueError, ServiceError, ServiceUnavailable) as exc:
+                status.update(label="Download falhou.", state="error")
+                st.error(str(exc))
+                return
+            status.update(label=f"{chosen.pdb_id} baixada.", state="complete")
+        # Downloaded here, the numbering is still resolved by alignment: the exact SIFTS offset
+        # depends on which part of the sequence the reference covers, and only POA0 records
+        # that. Said plainly rather than implied, since the difference is exactness.
+        st.info("Estrutura baixada e carregada. A numeração será conferida por alinhamento com a "
+                "referência — para o mapeamento SIFTS exato, gere a referência e a estrutura "
+                "juntas pelo POA0 na etapa 1.")
+
+
+def _describe_regions(report, regions, epitopes, chain: str, *, grouped: bool, labels: bool,
+                      track: str, structure: str, copies=(), highlighting: bool = True) -> None:
+    """Under the viewer: what was highlighted, in words and as a table, and what could not be."""
+    if not regions:
+        # The structure *is* this protein — the mapping accepted it — and still nothing is
+        # colored. A green banner counting zero regions read as success; what the person needs to
+        # hear is that the picture is plain on purpose, and why.
+        if highlighting:
+            st.info(f"`{structure}` é de {track}, mas nenhum dos epítopos cai no trecho que ela "
+                    f"resolve — a estrutura é exibida sem destaque. {report.summary()}")
+    elif grouped:
+        st.success(f"{len(regions)} região(ões) de {track} destacada(s) em `{structure}`, reunindo "
+                   f"{len(report.ranges)} epítopo(s). {report.summary()}")
+    else:
+        st.success(f"{len(regions)} epítopo(s) de {track} destacado(s) em `{structure}`. "
+                   f"{report.summary()}")
+    if regions and copies:
+        st.caption(f"A estrutura traz esta proteína mais de uma vez: o destaque vale também para "
+                   f"a(s) cadeia(s) {', '.join(copies)}, cópia(s) da cadeia {chain} com a mesma "
+                   "numeração. Escolha uma cadeia em **Cadeia** para destacar só ela.")
+    for warning in report.warnings:
+        st.warning(warning)
+    if labels and len(regions) > viz.MAX_AUTO_LABELS:
+        st.caption(f"São {len(regions)} regiões, então os rótulos começam ocultos para não "
+                   "encobrir a estrutura — o botão `Rótulos` do visualizador os mostra.")
+
+    if regions:
+        st.markdown("**Regiões destacadas**")
+        st.caption("Os nomes são os dos rótulos e da legenda do visualizador. `Sequência` é a "
+                   "posição na proteína das predições; `PDB`, a numeração que o arquivo usa.")
+        st.dataframe(viz.regions_frame(regions, chain), width="stretch", hide_index=True)
+    if report.unmapped:
+        absent = set(report.unmapped)
+        with st.expander(f"{len(absent)} epítopo(s) sem correspondência nesta estrutura"):
+            st.caption("Ficam fora do trecho que a estrutura resolve, então não há resíduo a "
+                       "destacar. Outra estrutura da mesma proteína pode cobri-los.")
+            st.dataframe(pd.DataFrame(
+                [{"Sequência": f"{e.start}–{e.end}", "Métodos": ", ".join(e.methods),
+                  "Peptídeo": e.peptide} for e in epitopes if (e.start, e.end) in absent]),
+                width="stretch", hide_index=True)
 
 
 def _show_structure_identity(pdb_text: str, filename: str) -> None:

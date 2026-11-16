@@ -908,8 +908,112 @@ def _apply_step_state(ctx: "WorkContext", restored: RestoredAnalysis,
                                 if _relative_to_run(ctx, pr.b2_json) in state["prepared_b2"]]
     if isinstance(state.get("ref_swap"), bool):
         restored.ref_swap = state["ref_swap"]
+    if isinstance(state.get("structure"), str):
+        # An analysis can hold several structures, and step 7 shows the one picked from the list.
+        # The record of arrivals only knows which came *last*, so going back to an earlier one
+        # left no trace there and the analysis reopened on a structure nobody was looking at.
+        chosen = present([state["structure"]])
+        if chosen:
+            restored.structure = chosen[0]
     restored.params = {key: value for key, value in state.items()
                        if key.startswith("params_") and isinstance(value, dict)}
+
+
+# --------------------------------------------------------------------------- structures (step 7)
+#: A classic PDB identifier: a digit followed by three letters or digits ('6H3X').
+PDB_ID = re.compile(r"[0-9][A-Za-z0-9]{3}")
+
+
+def structure_files(ctx: "WorkContext") -> List[str]:
+    """
+    Every structure this analysis holds, oldest first.
+
+    Step 7 used to know one structure — the last one to arrive — so comparing the same epitopes
+    on a second PDB meant uploading over the first and uploading the first again to go back.
+    The files were never the problem: each upload and each POA0 download is kept under its own
+    name. This is the list of them, read the same way a reopened analysis reads its inputs: the
+    recorded arrivals first, then any ``structure_*`` file that predates the record.
+    """
+    found: List[str] = []
+    recorded = set()
+    for item in read_input_history(ctx):
+        recorded.add(item["path"])
+        if item.get("role") != "structure":
+            continue
+        path = ctx.root / item["path"]
+        if path.is_file() and str(path) not in found:
+            found.append(str(path))
+    if ctx.inputs_dir.is_dir():
+        for path in sorted(ctx.inputs_dir.glob("*")):
+            if (path.is_file() and _relative_to_run(ctx, path) not in recorded
+                    and _classify_legacy_input(path.name)[0] == "structure"
+                    and str(path) not in found):
+                found.append(str(path))
+    return found
+
+
+def fetch_structure(ctx: "WorkContext", pdb_id: str) -> str:
+    """
+    Bring a PDB entry into the analysis by its identifier and return the path of the file.
+
+    Saved as ``inputs/structure_<ID>.pdb`` — the name POA0 gives the structure it downloads — and
+    recorded as a structure, so it is listed on step 7 and comes back when the analysis is
+    reopened. An entry already in the analysis is reused instead of downloaded again: the file is
+    the same, and step 7 has to keep working where the first download was the last moment with a
+    network.
+
+    The PDB format is asked for first, because it is what the rest of the tooling around a
+    structure expects. It cannot hold more than 62 chains or 99,999 atoms, so the largest entries
+    do not have it; those are fetched as mmCIF and saved as ``structure_<ID>.cif``. The message
+    used to tell the user to download such an entry from the site and upload it — to an uploader
+    that only took ``.pdb``.
+
+    Raises:
+        ValueError: ``pdb_id`` is not a four-character PDB identifier.
+        ServiceUnavailable: RCSB could not be reached, or has no such entry in either format.
+    """
+    from ..services import database_client
+    from ..services.base import ServiceUnavailable
+
+    code = str(pdb_id).strip().upper()
+    if not PDB_ID.fullmatch(code):
+        raise ValueError(
+            f"'{pdb_id}' não é um identificador do PDB: são quatro caracteres começando por um "
+            f"dígito, como 6H3X.")
+    candidates = [safe_child(ctx.inputs_dir, f"structure_{code}.{ext}") for ext in ("pdb", "cif")]
+    path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if path is None:
+        try:
+            text, path = database_client.fetch_structure(code), candidates[0]
+        except ServiceUnavailable as in_pdb_format:
+            try:
+                text, path = database_client.fetch_structure_cif(code), candidates[1]
+            except ServiceUnavailable:
+                raise in_pdb_format from None      # neither exists, or there is no network
+        # A 200 answer is not a structure: a proxy or a captive portal answers every URL with a
+        # page of its own. Saved under this name it would be reused on every later request for
+        # the entry — see above — and shown as an empty viewer with nothing to explain it.
+        if path.suffix == ".pdb":
+            is_structure = any(line.startswith(("ATOM  ", "HETATM")) for line in text.splitlines())
+        else:
+            is_structure = "_atom_site." in text
+        if not is_structure:
+            raise ServiceUnavailable(
+                f"O RCSB respondeu ao pedido de {code}, mas o conteúdo não é um arquivo PDB "
+                f"(nenhum registro ATOM).")
+        ctx.inputs_dir.mkdir(parents=True, exist_ok=True)
+        # Written beside the target and moved into place, for the same reason: a download cut
+        # short must not leave half a file under the name that means "already downloaded".
+        partial = path.with_name(path.name + ".part")
+        try:
+            with open(partial, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+            os.replace(partial, path)
+        finally:
+            if partial.exists():
+                partial.unlink()
+    record_input(ctx, path, role="structure", original_name=f"{code}{path.suffix}")
+    return str(path)
 
 
 # --------------------------------------------------------------------------- multi-species merging
@@ -1573,7 +1677,9 @@ def structure_mapping(ctx: "WorkContext", pdb_path: Optional[str]) -> Optional[D
         "offset": int(structure["offset_regiao"]),
         "span": span,
         "pdb_id": structure.get("pdb_id", ""),
-        "chain": sifts.get("chain", ""),
+        # The report holds ``asdict(ChainMapping)``, whose field is ``chain_id``; this read
+        # ``chain``, which that record never had, so the chain SIFTS names was always ''.
+        "chain": sifts.get("chain_id") or sifts.get("chain", ""),
         "covers_region": bool(structure.get("cobre_regiao", True)),
         "region": (region.get("start"), region.get("end")),
     }
