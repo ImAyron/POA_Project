@@ -675,7 +675,13 @@ Epitopo2
  __parâmetro -xmin:__ Valor mínimo para tamanho de epitopos preditos por outros preditores que não aqueles mencionados na seção 3.1.1  (default = 0, ou seja não há seleção de tamanho para estes epítopos).
  
  __parâmetro -xmax:__ Valor máximo para tamanho dos epitopos preditos por outros preditores que não aqueles mencionados na seção 3.1.1 (default = 0, ou seja não há seleção de tamanho para estes epítopos).
- 
+
+ __parâmetro -lmin:__ Valor mínimo para tamanho dos epítopos de **todos** os métodos (default = 0, sem seleção de tamanho mínimo).
+
+ __parâmetro -lmax:__ Valor máximo para tamanho dos epítopos de **todos** os métodos (default = 0, sem seleção de tamanho máximo).
+
+ > **Atenção ao escopo dos filtros de tamanho.** Os pares `-bmin/-bmax`, `-pmin/-pmax` e `-xmin/-xmax` valem **cada um para o seu método**. O NetCTL (`-n`) e o MHC-II (`-m`) **não possuem parâmetro de tamanho próprio**: um mínimo informado apenas nos campos por método não os alcança, e os epítopos desses dois entram na tabela consolidada com qualquer comprimento. Use `-lmin`/`-lmax` para que o limite valha para todos os métodos. Os dois tipos de filtro se somam — quando ambos estão definidos, prevalece o critério mais restritivo.
+
  __parâmetro -e:__ Opção para que os resultados também sejam organizados em planilha Excel (.xslx), além dos arquivos fastas que são gerados obrigatoriamente (default = n).
 
 
@@ -710,6 +716,17 @@ Após a análise de conservação feita pela ferramenta Epitope Conservancy Anal
 
 Como discutido, os resultados da primeira metade do pipeline (POA1) devem ser submetidos a análise de conservação na ferramenta online [Epitope Conservancy Analysis (IEDB)](http://tools.iedb.org/conservancy/). A análise de conservação deverá ser feita para todos os fastas de epítopos (separados por espécie do organismo no POA1). Os resultados são tabelas (formato .csv) que deverão ser baixadas e armazenadas em um único diretório. O POA2 recebe e avalia cada um dos arquivos fasta presentes no diretório, seleciona os epitopos com base no valor de conservação definido pelo usuário e organiza em uma planilha os epítopos que são mais ou menos conservados (ver seção 3.2.2) e sua classificação quanto a topologia da membrana. 
 
+
+> **Os CSVs de conservância são a entrada do POA2, nunca o resultado filtrado.** Eles trazem
+> sempre *todas* as linhas: o limiar de identidade não descarta epítopo nenhum nesses arquivos —
+> ele apenas define o que a coluna *percent of protein sequence matches at identity* conta. Isso
+> vale tanto para os CSVs baixados do IEDB quanto para os que a reimplementação local gera na
+> etapa 4 da interface. Quem descarta epítopos é o POA2, e a seleção dele sai na planilha
+> `POA2_analysis_<critério><t>.xlsx` (seção 3.2.5) — na interface, a etapa 6 oferece essa mesma
+> seleção em `.xlsx` e em `.csv`. Abrir um CSV da etapa 4 depois de apertar o filtro e encontrar
+> todos os epítopos lá não é sinal de que o filtro foi ignorado: é o arquivo errado para essa
+> conferência. Use o gráfico de funil da etapa 5, que mostra quantos epítopos sobrevivem a cada
+> filtro, ou a saída da etapa 6.
 
 #### 3.2.2 Argumentos Obrigatórios
 
@@ -992,6 +1009,10 @@ Additionally, a folder MUST be designated to store the analysis results (**param
 * **parameter -mic**: IC-50 threshold for the NN_align 2.3 algorithm used for epitope selection: IC50 < 50 nM (High-affinity binding to MHCII), IC50 < 500 nM (Intermediate affinity binding to MHCII), and IC50 < 5000 nM (Low-affinity binding to MHCII); Default = 50.
 * **parameter -xmin**: Minimum size for epitopes predicted by other predictors (default = 0, no minimum size).
 * **parameter -xmax**: Maximum size for epitopes predicted by other predictors (default = 0, no maximum size).
+* **parameter -lmin**: Minimum size for epitopes from **every** method (default = 0, no minimum size).
+* **parameter -lmax**: Maximum size for epitopes from **every** method (default = 0, no maximum size).
+
+> **Scope of the length filters.** `-bmin/-bmax`, `-pmin/-pmax` and `-xmin/-xmax` each bound **one method**. NetCTL (`-n`) and MHC-II (`-m`) have **no length parameter of their own**, so a minimum given through the per-method fields never reaches them and their epitopes enter the consolidated table at any length. Use `-lmin`/`-lmax` to bound every method. The two kinds add up: where both are set, the stricter one wins.
 * **parameter -e**: Option to export results as an Excel spreadsheet ```(.xlsx)``` in addition to the default ```.fasta``` files (default = n).
 
 #### 3.1.4 Running POA1

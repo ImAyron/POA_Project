@@ -320,7 +320,9 @@ def build_poa1_args(files: Dict[str, str], params: Dict, proteins_path: str, out
 
     Parameters:
         files: optional keys 'b2','b3','p','n','m','x' mapping to result file/dir paths.
-        params: optional keys 'bmin','bmax','pmin','pmax','mhla','mic','xmin','xmax','e'.
+        params: optional keys 'bmin','bmax','pmin','pmax','mhla','mic','xmin','xmax','e', plus
+            'lmin'/'lmax' — the length bound that applies to *every* method, the only one that
+            reaches NetCTL (-n) and MHC-II (-m).
         proteins_path: path to the protein FASTA (-f).
         out_dir: analysis output directory (-d).
     """
@@ -339,6 +341,8 @@ def build_poa1_args(files: Dict[str, str], params: Dict, proteins_path: str, out
         x=files.get("x", ""),
         xmin=int(params.get("xmin", 0)),
         xmax=int(params.get("xmax", 0)),
+        lmin=int(params.get("lmin", 0)),
+        lmax=int(params.get("lmax", 0)),
         d=out_dir,
         f=proteins_path,
         e=str(params.get("e", "n")),
@@ -436,6 +440,19 @@ def predictions_summary(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     out["length_hist"] = lengths.value_counts().sort_index().reset_index()
     out["length_hist"].columns = ["length", "count"]
     return out
+
+
+def results_csv(df: pd.DataFrame) -> bytes:
+    """
+    A results table as CSV bytes, ready to hand to a download button.
+
+    UTF-8 **with BOM**: Excel on Windows opens a plain UTF-8 CSV as cp1252 and mangles every
+    accent, and these tables carry epitope names built from species the researcher typed. The BOM
+    is what makes Excel read it as UTF-8, and ``pandas.read_csv`` strips it back off with
+    ``encoding='utf-8-sig'``.
+    """
+    frame = df if df is not None else pd.DataFrame()
+    return frame.to_csv(index=False).encode("utf-8-sig")
 
 
 def topology_summary(df: pd.DataFrame) -> pd.DataFrame:

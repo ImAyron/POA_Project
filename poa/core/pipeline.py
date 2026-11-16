@@ -162,6 +162,25 @@ def _check_epitope_integrity(dataframe, column_epitopes, column_ID):
 
 
 # --------------------------------------------------------------------------- POA1
+def filter_by_length(frame: pd.DataFrame, length_min: int = 0, length_max: int = 0) -> pd.DataFrame:
+    """
+    Keep the epitopes whose peptide length is within ``[length_min, length_max]``.
+
+    Either bound is disabled by 0, the same convention the per-method ``-bmin``/``-pmin``/``-xmin``
+    arguments use. This is the method-independent form of that filter: see
+    :func:`consolidate_predictions` for why one is needed.
+    """
+    if frame is None or frame.empty or not (length_min or length_max):
+        return frame
+    lengths = frame["Peptide Sequence"].astype(str).str.len()
+    keep = pd.Series(True, index=frame.index)
+    if length_min:
+        keep &= lengths >= length_min
+    if length_max:
+        keep &= lengths <= length_max
+    return frame[keep].reset_index(drop=True)
+
+
 def consolidate_predictions(args) -> pd.DataFrame:
     """
     Parse every supplied prediction file and consolidate into one standardized DataFrame.
@@ -253,6 +272,21 @@ def consolidate_predictions(args) -> pd.DataFrame:
         _check_epitope_integrity(epitopes_df, "Peptide Sequence", "ID_Sequence")
         predictions.append(epitopes_df)
 
+    # The bounds above are per method, and only three methods have them: -n (NetCTL) and -m
+    # (MHC-II) take no length argument at all. So a researcher who asked for "no epitope shorter
+    # than 5 aa" by filling one of those fields still got every shorter epitope that came from
+    # the other methods — measured on a PAP/IMED + MHC-II run, -pmin 16 left all 677 MHC-II
+    # 15-mers in the consolidated table. -lmin/-lmax say it once, for every method, and are
+    # applied after each parser has run so the per-method bounds keep their exact meaning.
+    lmin = int(getattr(args, "lmin", 0) or 0)
+    lmax = int(getattr(args, "lmax", 0) or 0)
+    if lmin or lmax:
+        before = sum(len(frame) for frame in predictions)
+        predictions = [filter_by_length(frame, lmin, lmax) for frame in predictions]
+        dropped = before - sum(len(frame) for frame in predictions)
+        logger.info("POA1 | length filter for every method (min=%s max=%s): %d epitope(s) dropped",
+                    lmin or "off", lmax or "off", dropped)
+
     # Consolidate all predictions into a single DataFrame
     df_predictions = pd.DataFrame(columns=STANDARD_COLUMNS)
     for prediction in predictions:
@@ -277,6 +311,11 @@ def consolidate_predictions(args) -> pd.DataFrame:
         if args.x != "":
             exports.append((epitopes_df, f"{filename[0]}_Epitopes"))
         for frame, stem in exports:
+            # The same global bound the consolidated table was filtered with. These spreadsheets
+            # are built from the per-method frames, which the filter above never touched: without
+            # this, '-e' would report epitopes that -lmin had already removed from every other
+            # output of the same run.
+            frame = filter_by_length(frame, lmin, lmax)
             frame, _, _ = align_to_reference(frame, args.f, pairs)
             frame.to_excel(rf"{args.d}/{stem}.xlsx", sheet_name="Prediction Results", startcol=0, index=False)
 
