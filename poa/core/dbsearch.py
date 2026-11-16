@@ -216,7 +216,13 @@ def run_poa0(args):
             f"(o pipeline divide os campos por '_'). Use --nome para escolher outro.")
 
     os.makedirs(args.d, exist_ok=True)
-    fasta_path = os.path.join(args.d, f"{protein_token}_{specie}.fasta")
+    # Named after the header, accession included. The header distinguishes two isolates of the
+    # same protein ('Genomepolyprotein_ZIKA_Q32ZE1' vs '..._A0A024B7W1'); the file name did not,
+    # so a second run on another isolate reopened the same path in mode 'w' and silently replaced
+    # the first sequence, handing the caller a path that no longer held what it had just fetched.
+    # Building a diversity set means fetching exactly such entries, so the collision struck the
+    # one workflow that needs several of them.
+    fasta_path = os.path.join(args.d, f"{header}.fasta")
     write_fasta(fasta_path, header, sub_sequence)
     report["arquivos"]["fasta"] = fasta_path
     report["sequencia"] = {"inicio": region.start, "fim": region.end,

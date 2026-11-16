@@ -92,7 +92,7 @@ conda create -n poa --override-channels -c conda-forge python=3.11 pip -y
 conda activate poa
 
 # dependências Python do pipeline + GUI
-pip install pandas numpy biopython openpyxl pytest requests streamlit plotly py3Dmol
+pip install pandas numpy biopython openpyxl pytest requests streamlit plotly
 
 # EMBOSS (substituto do PAP/IMED) — só existe no Linux, via bioconda
 conda install -n poa --override-channels -c conda-forge -c bioconda emboss -y
@@ -113,7 +113,7 @@ python -c "import pyTMHMM; print('pyTMHMM OK')"
 
 Verifique:
 ```bash
-python -c "import pandas, numpy, Bio, streamlit, plotly, requests, py3Dmol; print('py deps OK')"
+python -c "import pandas, numpy, Bio, streamlit, plotly, requests; print('py deps OK')"
 which antigenic && antigenic -help 2>&1 | head -n 3
 python -c "import pyTMHMM; print('pyTMHMM OK')"
 ```

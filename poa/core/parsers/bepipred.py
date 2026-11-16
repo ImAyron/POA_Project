@@ -87,6 +87,22 @@ def bp2_AntigenEpitopes(dataframe):
     # Parse species, protein, and sequence ID information
     slice_df[["Protein", "Specie", "ID_Sequence"]] = slice_df["antigens"].str.extract(BP2_ANTIGEN_KEY)
 
+    # A key that does not resolve into Protein_Specie_ID leaves all three fields NaN, and NaN
+    # never equals itself: the per-species filter in ``fasta_out`` then matches no row and writes
+    # a 0-byte ``nan_epitopes.fasta``. POA1 still reports success with the epitopes in its table,
+    # so the loss only surfaces as an empty conservancy stage much later. Refuse it here, the way
+    # ``bp3_FastaAnalysis`` refuses the same malformed header — the GUI already checks this up
+    # front (``backend.nonconforming_antigen_keys``); the CLI had no guard at all.
+    unresolved = slice_df.loc[slice_df["Protein"].isna(), "antigens"]
+    if len(unresolved):
+        keys = sorted({str(key) for key in unresolved})
+        raise ValueError(
+            f"ERROR: Bepipred-2.0 antigen key(s) {keys} do not follow the 'Protein_Specie_ID' "
+            f"convention (e.g. 'E_DENV1_ref'). The species cannot be resolved from them, so "
+            f"every epitope would be written to an empty 'nan_epitopes.fasta' and the "
+            f"conservancy analysis would receive nothing."
+        )
+
     # Classify residues as antigenic based on prediction score threshold
     slice_df["Classif"] = np.where(slice_df["PRED"] > 0.5, "Epitope", "-")
 

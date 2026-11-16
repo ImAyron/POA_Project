@@ -24,11 +24,10 @@ pip install -r requirements.txt
 ```
 
 Esse único comando já instala **tudo que o fluxo principal usa**, inclusive as bibliotecas da
-interface — `streamlit` (a interface), `plotly` (os gráficos) e **`py3Dmol`** (o visualizador 3D
-da etapa 7). Não há passo manual para nenhuma delas: se você instalou pelo `requirements.txt`, a
-visualização 3D já funciona. O `py3Dmol` também precisa de **internet no momento de visualizar**,
-porque a biblioteca JavaScript que ele usa vem de um CDN — veja
-[Visualização dos epítopos](#visualização-dos-epítopos-etapa-7).
+interface — `streamlit` (a interface) e `plotly` (os gráficos). Não há passo manual para nenhuma
+delas. O visualizador 3D da etapa 7 não tem pacote próprio: é uma página que carrega a biblioteca
+JavaScript 3Dmol.js no navegador, então precisa apenas de **internet no momento de visualizar** —
+veja [Visualização dos epítopos](#visualização-dos-epítopos-etapa-7).
 
 Extras que **não** são pacotes pip, ou são pesados demais para a instalação básica (instale apenas
 se quiser aquela automação):
@@ -80,26 +79,56 @@ Duas visualizações, com requisitos bem diferentes:
 método de predição. Usa apenas Plotly, que já vem no `requirements.txt`. Funciona offline e está
 sempre disponível quando o POA1 produziu epítopos.
 
-**Estrutura 3D** — os epítopos destacados em vermelho sobre uma estrutura `.pdb` que você envia.
-Depende de **`py3Dmol`**, que é a camada Python sobre a biblioteca JavaScript **3Dmol.js**. O
-py3Dmol não renderiza nada por conta própria: ele monta um HTML que carrega o 3Dmol.js e manda o
-navegador desenhar.
+**Estrutura 3D** — os epítopos destacados sobre uma estrutura, em formato PDB (`.pdb`) ou mmCIF
+(`.cif`). O visualizador é uma página
+que o próprio POA escreve (`poa/gui/viz.py`) e que usa a biblioteca JavaScript **3Dmol.js** no
+navegador; não há pacote Python por trás dele.
 
-> **O `py3Dmol` faz parte do `requirements.txt`** — ele é instalado junto com o resto pelo
-> `pip install -r requirements.txt`, **não** é um extra de instalação separada como o pyTMHMM ou
-> o EMBOSS. Se o seu ambiente foi montado antes de o visualizador 3D existir, ou instalando
-> pacote a pacote, rode `pip install -r requirements.txt` de novo para completá-lo —
-> ou, só para este: `pip install py3Dmol`.
+*Qual estrutura.* Uma análise guarda quantas estruturas você quiser, cada uma com o seu nome em
+`inputs/`. Elas chegam pelo POA0 na etapa 1 ou, na própria etapa 7, por **Adicionar estrutura**,
+que tem três abas:
 
-Três coisas decorrem desse desenho e valem saber antes de usar:
+* **Enviar arquivo** — um `.pdb` ou `.cif` seu, inclusive um modelo predito.
+* **Baixar pelo identificador** — a entrada do RCSB com aquele código (ex.: `6H3X`). Entradas
+  grandes demais para o formato PDB são baixadas em mmCIF.
+* **Buscar pela proteína** — lê o accession do terceiro campo do cabeçalho da referência
+  (`NS1_DENV1_P29990`), pergunta ao PDBe quais entradas do PDB cobrem essa proteína — ordenadas
+  por cobertura e resolução — e baixa a que você escolher. Sem accession no cabeçalho, a aba diz
+  isso e as outras duas continuam sendo o caminho; é o que acontece quando a referência não veio
+  do POA0 nem do UniProt.
+
+O campo **Estrutura em uso** alterna entre as estruturas da análise, para ver os mesmos epítopos em
+outra entrada do PDB sem enviar nada de novo. A que estava em uso é a que volta quando a análise é
+reaberta.
+
+*Qual cadeia.* Com **Cadeia** em `(automática)`, todas as cadeias do arquivo são comparadas com a
+sequência das predições e vale a que corresponde à proteína — num complexo com anticorpo ela nem
+sempre é a primeira. O destaque se repete nas cópias dessa cadeia que usam a mesma numeração (as
+duas metades de um dímero, por exemplo). Escolher uma cadeia restringe o destaque a ela.
+
+*O que cada trecho colorido é.* Os epítopos que se sobrepõem são reunidos em **regiões** (`R1`,
+`R2`, …) — um preditor de janela deslizante produz centenas de peptídeos quase iguais, e são os
+trechos contínuos que se enxergam na estrutura. Cada região tem a sua cor e aparece com o mesmo
+nome em três lugares: no rótulo sobre a estrutura, na legenda ao lado (clicar aproxima daquela
+região) e na tabela **Regiões destacadas**, que traz a posição na sequência das predições e a
+numeração do PDB lado a lado, os métodos e o peptídeo. Passar o mouse sobre um resíduo diz qual é
+e a que região pertence. Dá para colorir por método (as mesmas cores do mapa 2D), escolher quais
+métodos entram e desligar o agrupamento para ver cada epítopo separado.
+
+*Recortar.* **Recorte** mostra só uma parte da estrutura: a cadeia mapeada, um intervalo de
+resíduos, ou as regiões destacadas com a vizinhança em volta (em ångströms). Na barra do
+visualizador, **Corte frontal** e **Corte traseiro** fatiam a estrutura em profundidade, para ver
+o que está no interior; os demais botões enquadram, giram, mostram ou escondem os rótulos, trocam
+o fundo e salvam a vista como PNG.
+
+Duas coisas decorrem desse desenho e valem saber antes de usar:
 
 | Requisito | Por quê | O que acontece se faltar |
 |---|---|---|
-| **`py3Dmol` instalado** | É importado só na hora de renderizar, para que o resto da interface e os testes funcionem sem ele | A etapa 7 mostra um erro dizendo como instalar; o mapa 2D continua funcionando |
-| **Internet no momento de visualizar** | O 3Dmol.js vem de um CDN, carregado pelo navegador | O painel aparece vazio, **sem mensagem de erro** — nada é levantado do lado do Python |
+| **Internet no momento de visualizar** | O 3Dmol.js vem de um CDN, carregado pelo navegador | O painel diz que a biblioteca não chegou; o mapa 2D e a tabela de regiões continuam funcionando |
 | **Que a estrutura seja da proteína analisada** | O destaque é feito por número de resíduo, e o 3Dmol.js colore o número que receber, venha ele de onde vier | A etapa 7 **recusa o destaque** e explica a incompatibilidade |
 
-A terceira era a que mais enganava, e agora é verificada em vez de apenas avisada. Antes de
+A segunda era a que mais enganava, e agora é verificada em vez de apenas avisada. Antes de
 destacar qualquer coisa, a etapa 7 compara a sequência da estrutura com a sequência de referência
 daquela proteína/espécie (em `inputs/`) e remapeia as posições dos epítopos para a numeração que o
 arquivo realmente usa. Abaixo de 70% de identidade ela desenha a estrutura sem destaque nenhum e
@@ -113,19 +142,15 @@ eram pintadas de vermelho sem erro algum. Hoje a interface começa dizendo o que
 (`L-FUCULOSE KINASE FUCK · STREPTOCOCCUS PNEUMONIAE`) e recusa o destaque a 25,0% e 30,0% de
 identidade.
 
-**A estrutura não precisa mais ser baixada à mão.** A etapa 7 tem um expansor *"Buscar a estrutura
-no RCSB"*: ele lê o accession do terceiro campo do cabeçalho da referência (`NS1_DENV1_P29990`),
-pergunta ao PDBe quais entradas do PDB cobrem essa proteína — ordenadas por cobertura e resolução
-— e baixa a que você escolher. Sem accession no cabeçalho, a etapa diz isso e o upload continua
-sendo o caminho; é o que acontece quando a referência não veio do POA0 nem do UniProt.
-
 Duas rotas resolvem a numeração, e a etapa 7 usa a que estiver disponível:
 
 * **Mapeamento SIFTS**, quando a estrutura tem referência cruzada ao UniProt — exato. O POA0 grava
   o deslocamento no `POA0_relatorio.json` quando você baixa a estrutura com `--estrutura`, e a
   etapa 7 o lê de volta. Vale só para a estrutura que o próprio POA0 baixou: o deslocamento é
   relativo à região que ele escreveu, e aplicá-lo a outro arquivo colocaria os epítopos sobre os
-  resíduos errados com aparência de exatidão. A interface diz qual das duas rotas foi usada.
+  resíduos errados com aparência de exatidão. Se o deslocamento gravado não se confirmar contra
+  a referência em uso (outra região da mesma proteína, por exemplo), a etapa volta ao alinhamento
+  em vez de recusar a estrutura. A interface diz qual das duas rotas foi usada.
 * **Alinhamento** (`Bio.Align.PairwiseAligner`, BLOSUM62, extremidades livres), para estruturas
   enviadas à mão ou modelos preditos.
 
@@ -135,9 +160,9 @@ observada e marcados como parciais, em vez de serem estendidos por aritmética.
 
 > **Cuidado com o `residue_number` do PDBe.** Ele devolve dois números para o mesmo resíduo: o
 > índice da entidade e o `author_residue_number`, que é o que o arquivo de coordenadas usa. Na
-> 6H3X eles são **1** e **482**. Tomar um pelo outro desloca todo epítopo em 481 resíduos.
-
-O py3Dmol é necessário **apenas para a etapa 7**. O POA1, o POA2 e as etapas 1 a 6 não o importam.
+> 6H3X eles são **1** e **482**. Tomar um pelo outro desloca todo epítopo em 481 resíduos. O
+> arquivo mmCIF traz os mesmos dois números (`label_seq_id` e `auth_seq_id`); o POA lê o do autor,
+> que é também o que o visualizador usa.
 
 **Saída visível em cada etapa:** toda etapa mostra o que produziu, não apenas que executou.
 A **etapa 1** lista o comprimento de cada sequência e os resíduos ambíguos (o `X` que o POA1

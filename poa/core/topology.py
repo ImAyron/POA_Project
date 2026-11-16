@@ -171,6 +171,7 @@ def tmhmmAnalysis(args, dataframe):
 
         # Search for matching protein sequences
         matches = []
+        out_of_range = []   # records that carry the peptide but cannot host these coordinates
         for seq_polyprot_id, seq_polyprot, rec_lenght in records:
             # Check if the protein sequence belongs to the same virus as the epitope
             if not sameVirus(EpitopeVirus, seq_polyprot_id):
@@ -189,19 +190,39 @@ def tmhmmAnalysis(args, dataframe):
                              seq_polyprot_id)
                 continue
 
-            # Validate epitope position values
+            # Validate epitope position values.
+            # Disqualify this candidate rather than ending the run. The check sits inside the
+            # candidate loop, so a *second* record of the same protein/species that happens to
+            # carry the peptide — a shorter isolate, a fragment, a partial CDS — used to abort
+            # the whole POA2 even when the correct longer record had already matched, and
+            # regardless of the order the records appear in. Out-of-range coordinates say this
+            # record is not the one the epitope was called on; they say nothing about the others.
             start_pos_verif = rangeVerify(init_pos, rec_lenght)
             end_pos_verif = rangeVerify(fin_pos, rec_lenght)
             if (start_pos_verif != True) or (end_pos_verif != True):
-                raise Exception(f"Failed because epitope positions in {idt_epitope} are invalid.")
+                logger.debug("%s POA2/topology | %s: positions %s-%s fall outside %s (%s aa)",
+                             TAG_DATA, idt_epitope, init_pos, fin_pos, seq_polyprot_id, rec_lenght)
+                out_of_range.append(seq_polyprot_id)
+                continue
 
             # Match epitope with TMHMM prediction results
             if seq_polyprot_id in annotation_by_id:
                 matches.append((seq_polyprot_id, seq_polyprot))
 
         if not matches:
-            # No protein carries this epitope: keep the '-' placeholder for THIS row only.
-            warnings.warn(f"Epitope {idt_epitope} matched no protein in the FASTA file; its membrane topology is reported as '-'.")
+            # Nothing usable for this epitope: keep the '-' placeholder for THIS row only. The
+            # two reasons are reported apart because they point at different files — a missing
+            # protein is a gap in -f, out-of-range coordinates mean the epitope was called on a
+            # different reference than the one -f supplies.
+            if out_of_range:
+                warnings.warn(
+                    f"Epitope {idt_epitope} states positions {init_pos}-{fin_pos}, which fall "
+                    f"outside every record carrying it ({', '.join(sorted(set(out_of_range)))}); "
+                    "its membrane topology is reported as '-'. Check that the epitope "
+                    "coordinates refer to the same reference as the -f FASTA."
+                )
+            else:
+                warnings.warn(f"Epitope {idt_epitope} matched no protein in the FASTA file; its membrane topology is reported as '-'.")
             Out_portion_list.append("-")
             TM_portion_list.append("-")
             Ins_portion_list.append("-")

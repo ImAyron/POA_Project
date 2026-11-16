@@ -1,3 +1,112 @@
+# Etapa 7 com várias estruturas, regiões nomeadas e recorte — e o campo que perdia a segunda mudança — 16/11/2026
+
+Trabalho feito sobre a `feature/viz-realdata`, depois dos PRs #5 e #6. Suíte: de 544 para **626
+passando**, no Windows (`.venv`) e no ambiente conda `poa` da WSL. No Windows a base tinha 543 de
+544; a falha restante está corrigida aqui.
+
+## Todo campo perdia a segunda mudança seguida
+
+O defeito mais sério não é da etapa 7. Em toda a interface, mudar **o mesmo campo duas vezes
+seguidas** descartava a segunda mudança, em silêncio: marcar uma caixa funcionava, desmarcar em
+seguida não fazia nada, a terceira tentativa funcionava. `60 → 80` gravava; `80 → 90` voltava a
+mostrar 80.
+
+A causa está no padrão da STATE POLICY, `x = st.checkbox(..., value=x)`. O Streamlit identifica um
+widget sem `key` pelos argumentos, o valor padrão entre eles. Gravada a primeira mudança, o padrão
+passa a ser outro, o campo vira um widget *novo*, e o valor que o navegador acabou de mandar —
+para o widget antigo — é jogado fora. Os testes existentes mudam cada campo uma vez só, por isso
+nunca viram.
+
+Atingia os parâmetros do POA1 (etapa 1), alelos e comprimento do MHC-II (etapa 2), limiar e
+critério (etapa 4) e os filtros do POA2 (etapa 5) — onde o valor que fica no lugar decide quais
+epítopos são selecionados. Reproduzido no `AppTest` e num Chrome de verdade.
+
+Todos esses campos passam por `_field` (`app.py`): o widget ganha `key` fixa e é semeado pelo
+estado da sessão, sem `value=`. Ele é semeado de novo só quando não tem estado (primeira vez, ou a
+etapa foi deixada) ou quando o registro mudou por fora — análise reaberta, limiar lido dos CSVs.
+`test_no_keyless_field_takes_its_default_from_session_state` recusa a construção antiga; sobre o
+código de antes ele aponta 28 campos.
+
+## Etapa 7: de uma estrutura para uma lista
+
+A etapa guardava uma estrutura e a única forma de trocar era enviar outra por cima. Os arquivos
+nunca foram o problema — cada um fica com o seu nome em `inputs/`. `backend.structure_files` os
+lista, **Estrutura em uso** escolhe entre eles, e a escolha vai para o `step_state.json`: o
+registro de chegadas sabe qual arquivo veio por último, não a qual a pessoa voltou.
+
+A busca do PR #5 continua, agora como uma das três abas de **Adicionar estrutura**: enviar arquivo,
+baixar pelo identificador (novo), buscar pela proteína. As três terminam em
+`backend.fetch_structure`/`save_upload` e na mesma lista. Dois ajustes na busca: a listagem fica
+presa ao accession que a pediu (trocar de proteína deixava na tela as estruturas da anterior), e o
+download reaproveita o arquivo que a análise já tem.
+
+## mmCIF
+
+A mensagem de falha do download mandava baixar do site e enviar o arquivo — para um uploader que só
+aceitava `.pdb`. Agora o uploader aceita `.cif`, e o download cai para mmCIF quando a entrada não
+existe em formato PDB. `structure_map` lê os dois formatos pelo mesmo caminho, usando
+`auth_seq_id`/`auth_asym_id` — os mesmos campos que o 3Dmol.js lê. Na 6H3X o `label_seq_id` é 1
+onde o `auth_seq_id` é 482; conferido que o mmCIF e o PDB da mesma entrada dão resíduos, átomos e
+regiões idênticos.
+
+## SIFTS: três ajustes sobre o PR #5
+
+- `structure_mapping` lia `sifts["chain"]`, mas o relatório grava `asdict(ChainMapping)`, cujo
+  campo é `chain_id`. A cadeia do SIFTS vinha sempre vazia. (O teste do PR #5 usava um relatório
+  com `chain`, por isso passava.)
+- Um epítopo sem **nenhum** resíduo no arquivo saía como mapeado e "parcial" pela rota SIFTS — um
+  intervalo de números sem nada para colorir, contado entre os destacados. Agora é "sem
+  correspondência", como na rota do alinhamento.
+- Se o deslocamento gravado não se confirma contra a referência em uso (outra região da mesma
+  proteína), a etapa volta ao alinhamento em vez de recusar a estrutura.
+
+## Cadeia: fecha um item aberto
+
+"Cadeia única escolhida por ordem de arquivo" estava em aberto desde 19/10. Com **Cadeia** em
+`(automática)`, todas as cadeias distintas são comparadas e vale a que corresponde à proteína; num
+complexo com anticorpo a primeira cadeia fazia a estrutura inteira ser recusada. O destaque se
+repete nas cópias com a mesma numeração — a 5U0B é um dímero e só a cadeia A era colorida.
+
+## O visualizador deixou de usar o py3Dmol
+
+Regiões nomeadas, legenda que aproxima, tooltip do resíduo e corte em profundidade precisam de
+código rodando no navegador com acesso ao objeto do visualizador, que o py3Dmol guarda numa
+variável de nome próprio. `viz.py` escreve a página direto em 3Dmol.js (2.5.5, fixada) e o
+`py3Dmol` saiu do `requirements.txt`. O arquivo enviado é embutido escapando `<`, `>` e `&`, porque
+`json.dumps` deixa `</script>` passar e o iframe tem acesso ao app.
+
+Epítopos sobrepostos viram regiões (`R1`, `R2`, …): uma análise real tinha 668 15-mers de MHC-II
+numa poliproteína, e 668 rótulos não identificam nada. `MappingReport.sources` passou a dizer de
+qual epítopo veio cada intervalo — `ranges` omite os não mapeados, então a posição N da saída não
+era o epítopo N da entrada.
+
+## Menores
+
+- `pipeline.run_poa2` montava o caminho da planilha com `/` literal; no Windows saía
+  `...\poa2_out/POA2_analysis_ge70.xlsx`, diferente do mesmo arquivo achado ao listar a pasta. Era
+  a única falha da suíte no Windows.
+- Download que responde 200 com algo que não é estrutura (proxy, portal cativo) não é mais gravado
+  como tal; download interrompido não deixa arquivo pela metade.
+- Zero regiões destacadas não aparece mais em verde como sucesso.
+
+## Também neste PR, de trabalho anterior no `main`
+
+Estavam sem commit na árvore de trabalho e vêm num commit próprio: o destino da sequência gerada
+pelo POA0 (referência do POA1 ou conjunto de comparação da etapa 4), o nome do FASTA do POA0 com o
+accession, a recusa de chaves do BepiPred-2.0 fora de `Proteína_Espécie_ID` na CLI, e a topologia
+do POA2 deixando de abortar por um segundo registro com coordenadas fora de faixa.
+
+## Ainda em aberto
+
+- Estruturas muito grandes são embutidas inteiras na página a cada mudança no formulário; acima de
+  20 MB a etapa avisa, mas não há carregamento parcial.
+- O `main` está atrás desta branch pelos PRs #5 e #6.
+- Continuam valendo os itens de 19/10: *outage* de API indistinguível de "sem dados", apagar
+  análise falhando no Windows, saída do POA2 sobrescrevendo quando só `-m`/`-imin`/`-imax`/`-idf`
+  mudam, e o denominador da conservância versus o IEDB.
+
+---
+
 # Revisão do alinhamento ao `-f`: três pontas soltas — 28/10/2026
 
 Revisão da correção de 26/10 abaixo. A regra central — comparar cada epítopo com o `-f` em vez de
