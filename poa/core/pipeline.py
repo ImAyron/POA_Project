@@ -392,7 +392,11 @@ def run_poa2(args) -> Poa2Result:
 
     # Set output directory path
     if args.r != "":
-        path = f"{args.r}/POA2_analysis"
+        # os.path.join, not a literal '/': on Windows the literal produced
+        # '...\poa2_out/POA2_analysis_ge70.xlsx', which opens fine and compares unequal to the
+        # same file found by listing the folder — reopening an analysis then held a path that
+        # did not match the one the run had returned.
+        path = os.path.join(args.r, "POA2_analysis")
     else:
         path = "POA2_analysis"
 
