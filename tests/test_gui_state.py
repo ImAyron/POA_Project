@@ -187,3 +187,84 @@ def test_every_session_key_is_declared_before_use():
     mapping_methods = {"setdefault", "get", "keys"}   # ss is a mapping, not only an attr bag
 
     assert not (used - declared - mapping_methods)
+
+
+# --------------------------------------------------------------------------- consecutive changes
+def test_changing_the_same_filter_twice_in_a_row_keeps_the_second_change(results_root):
+    """
+    Every second change to a field was silently dropped, on every form of the interface.
+
+    The fields took their default from the session key they are mirrored into. Streamlit tells
+    keyless widgets apart by their arguments, so once the first change was stored the default was
+    different, the field was a new widget, and the value the browser had just sent for the old
+    one was thrown away: 60 -> 80 worked, 80 -> 90 showed 80 again. The tests above all change
+    each field once, which is why they never saw it. These are the POA2 filters — the value left
+    in place decides which epitopes are selected.
+    """
+    at = _open_step5(results_root)
+
+    for wanted in (80, 90, 85, 70):
+        at = _number(at, "Identidade mín").set_value(wanted).run()
+        assert _number(at, "Identidade mín").value == wanted
+        assert at.session_state["params_poa2"]["imin"] == wanted
+    for wanted in (True, False, True, False):
+        at = _checkbox(at, "também como filtro").set_value(wanted).run()
+        assert at.session_state["params_poa2"]["idf"] is wanted
+    for wanted in (1, 2, None, 3):
+        at = next(s for s in at.selectbox if "-rf" in s.label).set_value(wanted).run()
+        assert at.session_state["params_poa2"]["rf"] == wanted
+    assert not at.exception
+
+
+def test_a_field_follows_its_record_when_something_else_changes_it(results_root):
+    """
+    The other half of ``_field``: the form must not hold on to a value the record has left.
+
+    Reopening an analysis, or reading a threshold back from the CSVs, changes the key of record
+    while the widget still has state of its own. A widget that kept showing its old value would
+    then be written straight back over what was just restored.
+    """
+    at = _open_step5(results_root)
+    at = _number(at, "Identidade mín").set_value(80).run()
+
+    at.session_state["params_poa2"] = dict(at.session_state["params_poa2"], imin=45, idf=True)
+    at = at.run()
+
+    assert _number(at, "Identidade mín").value == 45
+    assert _checkbox(at, "também como filtro").value is True
+    assert at.session_state["params_poa2"]["imin"] == 45
+    # and the person can still change it afterwards
+    at = _number(at, "Identidade mín").set_value(50).run()
+    assert at.session_state["params_poa2"]["imin"] == 50
+
+
+def test_the_threshold_of_step_4_keeps_consecutive_changes(results_root):
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["run_path"] = str(results_root)
+    at.session_state["poa1_result"] = object()          # step 4 only checks that POA1 ran
+    at.run()
+    at = at.sidebar.radio[0].set_value(STEP4).run()
+
+    for wanted in (80, 90, 65):
+        at = _number(at, "Limiar de identidade de sequência").set_value(wanted).run()
+        assert at.session_state["threshold"] == wanted
+    for wanted in ("<", ">=", "<"):
+        at = next(r for r in at.radio if r.label == "Critério").set_value(wanted).run()
+        assert at.session_state["cons_operator"] == wanted
+
+
+def test_the_filters_of_step_1_keep_consecutive_changes(results_root):
+    at = AppTest.from_file(APP, default_timeout=90)
+    at.session_state["run_path"] = str(results_root)
+    at.run()
+
+    for wanted in (8, 12, 9):
+        at = _number(at, "Bepipred min").set_value(wanted).run()
+        assert at.session_state["params_poa1"]["bmin"] == wanted
+    for wanted in ("DP", "DQ", "DR"):
+        at = next(s for s in at.selectbox if "Classe HLA" in s.label).set_value(wanted).run()
+        assert at.session_state["params_poa1"]["mhla"] == wanted
+    for wanted in (True, False, True):
+        at = _checkbox(at, "Exportar .xlsx").set_value(wanted).run()
+        assert at.session_state["params_poa1"]["e"] == ("y" if wanted else "n")
+    assert not at.exception

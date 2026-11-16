@@ -67,11 +67,13 @@ st.set_page_config(page_title="POA — Pipeline de Otimização de Antígenos", 
 #
 #   1. The value of record lives in session state under a plain, non-widget key (``ss.threshold``,
 #      ``ss.params_poa1``, ``ss.params_poa2``, …). Plain keys are never cleaned up by Streamlit.
-#   2. The widget reads that key as its default and the result is written straight back, so the
-#      key is always what the form currently shows.
-#   3. When a widget needs its own ``key=``, it gets a *different* name than the key of record
-#      (``key="ref_swap_cb"`` next to ``ss.ref_swap``). Assigning to a widget's own key raises in
-#      Streamlit, and widget keys are the ones that get discarded.
+#   2. The widget is drawn through ``_field``, which hands it that value and returns what it now
+#      holds; the result is written straight back, so the key is always what the form currently
+#      shows. The value is *not* passed as the widget's ``value=``/``index=`` — see ``_field`` for
+#      why that loses every second change.
+#   3. The widget's own ``key=`` gets a *different* name than the key of record
+#      (``key="ref_swap_cb"`` next to ``ss.ref_swap``). Assigning to a widget's own key after the
+#      widget exists raises in Streamlit, and widget keys are the ones that get discarded.
 #   4. Grouped parameters are kept as one dict per step, so a step's form is one unit of state.
 #
 # Scope of a reset, from narrowest to widest:
@@ -86,7 +88,46 @@ st.set_page_config(page_title="POA — Pipeline de Otimização de Antígenos", 
 #: so a new run never inherits the previous one's file paths or results
 _ANALYSIS_KEYS = ("proteins_path", "ref_raw", "ref_uploads", "poa1_sources", "prepared_b2",
                   "poa1_result", "conservancy_ready", "comparison_sets", "poa2_result",
-                  "poa2_ran_with", "pdb_path", "poa1_signature", "poa2_signature")
+                  "poa2_ran_with", "pdb_path", "pdb_upload_seen", "viz_structures",
+                  "viz_structures_for", "poa1_signature", "poa2_signature")
+
+
+_UNSET = object()
+
+
+def _field(widget, label, *args, record, key: str, **kwargs):
+    """
+    Draw an input whose value of record lives in a plain session key; return what it now holds.
+
+    The obvious way to mirror a widget into session state is ``x = st.checkbox(..., value=x)``,
+    and it loses every second change. Streamlit identifies a widget without a key by its
+    arguments, the default among them. The first change is stored, so on the next interaction the
+    default is different, the widget is a *new* widget, and the value the browser just sent — for
+    the old one — is discarded: tick a box and it ticks, untick it and it stays ticked, untick it
+    again and it unticks. Measured in a browser on the step-7 form and reproduced on the POA2
+    filters of step 5, where the value silently left in place is a scientific parameter.
+
+    So the default never goes through the widget's own argument. The widget gets a fixed ``key``
+    and is seeded through session state, which keeps its identity constant, and it is re-seeded
+    in exactly two cases: when it has no state (first render, or the step was left and the widget
+    state discarded — the case STATE POLICY exists for), and when the record was changed by
+    something other than this widget since it last ran (an analysis reopened, a threshold read
+    back from the CSVs), which is told apart by remembering what the widget last returned.
+
+    Args:
+        widget: the Streamlit function, e.g. ``st.number_input``.
+        label, *args, **kwargs: passed to it as they are — without ``value``/``index``/``default``.
+        record: the value of record right now, already valid for the widget (inside its range,
+            among its options). The caller writes the returned value back to where this came from.
+        key: the widget's own key; not the name of the key of record.
+    """
+    state = st.session_state
+    shadow = f"{key}:record"
+    if key not in state or state.get(shadow, _UNSET) != record:
+        state[key] = record
+    value = widget(label, *args, key=key, **kwargs)
+    state[shadow] = value
+    return value
 
 
 def _init_state():
@@ -102,8 +143,10 @@ def _init_state():
     ss.setdefault("params_poa2", {})
     ss.setdefault("params_mhcii", {})      # step 2: IEDB alleles and peptide length
     ss.setdefault("params_viz", {})        # step 7: 3D representation controls
-    ss.setdefault("pdb_path", None)        # step 7: the uploaded structure, kept by path
-    ss.setdefault("viz_structures", [])    # step 7: PDB entries the RCSB search offered
+    ss.setdefault("pdb_path", None)        # step 7: the structure on screen, kept by path
+    ss.setdefault("pdb_upload_seen", None)  # step 7: the upload already adopted (see _structure_picker)
+    ss.setdefault("viz_structures", [])    # step 7: PDB entries the PDBe search offered
+    ss.setdefault("viz_structures_for", "")  # step 7: the accession that listing answers
     # Reopening an analysis loads its files back onto their own steps. The flag survives the
     # rerun that follows adoption, because the analysis context does not exist yet when the
     # button is clicked; the summary is kept so the sidebar can say what came back.
@@ -703,9 +746,9 @@ def step_inputs():
     # The label says where the inversion lands, because this box settles it for the whole run:
     # the -f it produces is what POA1 aligns every prediction to. Saying only "inverter os dois
     # primeiros campos" described a step-1 detail and left the user to guess at the reach.
-    swap = st.checkbox("Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `alphavirus_e2`) — "
-                       "inverter os dois primeiros campos e usar essa ordem na análise inteira",
-                       value=ss.ref_swap, key="ref_swap_cb", help=HELP["swap_headers"])
+    swap = _field(st.checkbox, "Meus cabeçalhos estão em `Espécie_Proteína` (ex.: `alphavirus_e2`) "
+                  "— inverter os dois primeiros campos e usar essa ordem na análise inteira",
+                  record=bool(ss.ref_swap), key="ref_swap_cb", help=HELP["swap_headers"])
     ss.ref_swap = swap
 
     if ss.ref_raw:
@@ -759,32 +802,35 @@ def step_inputs():
                      "separar as espécies nas etapas 3 e 4.")
 
     st.subheader("Parâmetros de filtragem (opcionais)")
+    saved = ss.params_poa1
+    classes = ["DR", "DP", "DQ"]
     c1, c2, c3 = st.columns(3)
     with c1:
-        bmin = st.number_input("Bepipred min (bmin)", 0, 100, ss.params_poa1.get("bmin", 0),
-                               help=HELP["len_min"])
-        bmax = st.number_input("Bepipred max (bmax)", 0, 100, ss.params_poa1.get("bmax", 0),
-                               help=HELP["len_max"])
+        bmin = _field(st.number_input, "Bepipred min (bmin)", 0, 100,
+                      record=int(saved.get("bmin", 0)), key="poa1_bmin_w", help=HELP["len_min"])
+        bmax = _field(st.number_input, "Bepipred max (bmax)", 0, 100,
+                      record=int(saved.get("bmax", 0)), key="poa1_bmax_w", help=HELP["len_max"])
     with c2:
-        pmin = st.number_input("PAP min (pmin)", 0, 100, ss.params_poa1.get("pmin", 0),
-                               help=HELP["len_min"])
-        pmax = st.number_input("PAP max (pmax)", 0, 100, ss.params_poa1.get("pmax", 0),
-                               help=HELP["len_max"])
+        pmin = _field(st.number_input, "PAP min (pmin)", 0, 100,
+                      record=int(saved.get("pmin", 0)), key="poa1_pmin_w", help=HELP["len_min"])
+        pmax = _field(st.number_input, "PAP max (pmax)", 0, 100,
+                      record=int(saved.get("pmax", 0)), key="poa1_pmax_w", help=HELP["len_max"])
     with c3:
-        xmin = st.number_input("Outros min (xmin)", 0, 100, ss.params_poa1.get("xmin", 0),
-                               help=HELP["len_min"])
-        xmax = st.number_input("Outros max (xmax)", 0, 100, ss.params_poa1.get("xmax", 0),
-                               help=HELP["len_max"])
+        xmin = _field(st.number_input, "Outros min (xmin)", 0, 100,
+                      record=int(saved.get("xmin", 0)), key="poa1_xmin_w", help=HELP["len_min"])
+        xmax = _field(st.number_input, "Outros max (xmax)", 0, 100,
+                      record=int(saved.get("xmax", 0)), key="poa1_xmax_w", help=HELP["len_max"])
     c4, c5, c6 = st.columns(3)
     with c4:
-        mhla = st.selectbox("Classe HLA (MHC-II)", ["DR", "DP", "DQ"],
-                            index=["DR", "DP", "DQ"].index(ss.params_poa1.get("mhla", "DR")),
-                            help=HELP["mhla"])
+        mhla = _field(st.selectbox, "Classe HLA (MHC-II)", classes,
+                      record=saved.get("mhla") if saved.get("mhla") in classes else "DR",
+                      key="poa1_mhla_w", help=HELP["mhla"])
     with c5:
-        mic = st.number_input("IC50 threshold (mic, nM)", 0, 50000, ss.params_poa1.get("mic", 50),
-                              help=HELP["mic"])
+        mic = _field(st.number_input, "IC50 threshold (mic, nM)", 0, 50000,
+                     record=int(saved.get("mic", 50)), key="poa1_mic_w", help=HELP["mic"])
     with c6:
-        export = st.checkbox("Exportar .xlsx por método (-e)", value=ss.params_poa1.get("e", "n") == "y")
+        export = _field(st.checkbox, "Exportar .xlsx por método (-e)",
+                        record=saved.get("e", "n") == "y", key="poa1_export_w")
 
     ss.params_poa1 = dict(bmin=bmin, bmax=bmax, pmin=pmin, pmax=pmax, xmin=xmin, xmax=xmax,
                           mhla=mhla, mic=mic, e="y" if export else "n")
@@ -1106,13 +1152,13 @@ def step_predictions():
     with st.expander("🅃 Células T-auxiliares — MHC-II Binding (IEDB)", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
-            alleles = st.text_input("Alelos (separados por vírgula)",
-                                    ss.params_mhcii.get("alleles", "HLA-DRB1*01:01"),
-                                    help=HELP["mhcii_alleles"])
+            alleles = _field(st.text_input, "Alelos (separados por vírgula)",
+                             record=str(ss.params_mhcii.get("alleles", "HLA-DRB1*01:01")),
+                             key="mhcii_alleles_w", help=HELP["mhcii_alleles"])
         with c2:
-            length = st.number_input("Comprimento do peptídeo", 9, 25,
-                                     int(ss.params_mhcii.get("length", 15)),
-                                     help=HELP["mhcii_length"])
+            length = _field(st.number_input, "Comprimento do peptídeo", 9, 25,
+                            record=int(ss.params_mhcii.get("length", 15)),
+                            key="mhcii_length_w", help=HELP["mhcii_length"])
         ss.params_mhcii = dict(alleles=alleles, length=int(length))
         if st.button("Automatizar MHC-II (API IEDB)"):
             _automate_mhcii(alleles, int(length))
@@ -1303,20 +1349,21 @@ def step_conservancy():
 
     c1, c2 = st.columns([1, 2])
     with c1:
-        ss.threshold = st.number_input("Limiar de identidade de sequência (%)", 1, 100,
-                                       ss.threshold, help=HELP["cons_threshold"])
+        ss.threshold = int(_field(st.number_input, "Limiar de identidade de sequência (%)",
+                                  1, 100, record=int(ss.threshold), key="cons_threshold_w",
+                                  help=HELP["cons_threshold"]))
     with c2:
-        ss.cons_operator = st.radio(
-            "Critério", [">=", "<"],
-            index=0 if ss.cons_operator == ">=" else 1,
+        ss.cons_operator = _field(
+            st.radio, "Critério", [">=", "<"],
+            record=">=" if ss.cons_operator == ">=" else "<", key="cons_operator_w",
             format_func=lambda op: "Conservados (≥ limiar)" if op == ">=" else "Únicos (< limiar)",
             horizontal=True, help=HELP["cons_operator"])
     st.caption("O critério escolhido aqui decide quais proteínas contam como *match* e fica gravado "
                "junto dos CSVs. Ele precisa ser o mesmo objetivo da etapa 5 — o POA2 recusa a "
                "execução se divergirem, em vez de apenas rotular a coluna com o valor errado.")
     modes = ["Reimplementação local (recomendado)", "Upload manual dos CSVs"]
-    mode = st.radio("Modo", modes, index=0 if ss.cons_mode_local else 1,
-                    help=HELP["cons_mode"])
+    mode = _field(st.radio, "Modo", modes, record=modes[0 if ss.cons_mode_local else 1],
+                  key="cons_mode_w", help=HELP["cons_mode"])
     ss.cons_mode_local = mode == modes[0]
 
     # POA1 wrote one epitope FASTA per species; each must be compared against its OWN protein set.
@@ -1538,15 +1585,15 @@ def step_poa2():
                    "validá-lo**; confira antes de usar os resultados.")
         c_t, c_op = st.columns([1, 2])
         with c_t:
-            t_value = int(st.number_input("Limiar de identidade (t, %)", 1, 100,
-                                          int(ss.threshold), key="poa2_t_declared",
-                                          help=HELP["poa2_declared_t"]))
+            t_value = int(_field(st.number_input, "Limiar de identidade (t, %)", 1, 100,
+                                 record=int(ss.threshold), key="poa2_t_declared",
+                                 help=HELP["poa2_declared_t"]))
         with c_op:
-            op_value = st.radio(
-                "Critério dos CSVs", [">=", "<"],
-                index=0 if ss.cons_operator == ">=" else 1,
+            op_value = _field(
+                st.radio, "Critério dos CSVs", [">=", "<"],
+                record=">=" if ss.cons_operator == ">=" else "<", key="poa2_op_declared",
                 format_func=lambda op: "Conservados (≥)" if op == ">=" else "Únicos (<)",
-                horizontal=True, key="poa2_op_declared", help=HELP["poa2_declared_op"])
+                horizontal=True, help=HELP["poa2_declared_op"])
         ss.threshold, ss.cons_operator = t_value, op_value
         st.caption("Para não precisar informar isto de novo, registre o limiar na etapa 4 — ela "
                    "grava um `conservancy_meta.json` junto dos CSVs, e aí a etapa 5 passa a ler "
@@ -1602,24 +1649,26 @@ def step_poa2():
                              index=objectives.index(default_objective),
                              format_func=lambda x: "Conservados (≥)" if x == "conserved" else "Únicos (<)",
                              help=HELP["poa2_objective"])
-        rf = st.selectbox("FASTA por topologia (-rf)",
-                          rf_options,
-                          index=rf_options.index(saved.get("rf")) if saved.get("rf", None) in rf_options else 0,
-                          format_func=lambda v: {None: "não gerar", 0: "todos", 1: "externos",
-                                                 2: "transmembrana", 3: "internos"}[v],
-                          help=HELP["poa2_rf"])
+        rf = _field(st.selectbox, "FASTA por topologia (-rf)", rf_options,
+                    record=saved.get("rf") if saved.get("rf") in rf_options else None,
+                    key="poa2_rf_w",
+                    format_func=lambda v: {None: "não gerar", 0: "todos", 1: "externos",
+                                           2: "transmembrana", 3: "internos"}[v],
+                    help=HELP["poa2_rf"])
     with c2:
-        imin = st.number_input("Identidade mín. (%)", 0, 100, int(saved.get("imin", 60)),
-                               help=HELP["poa2_imin"])
-        imax = st.number_input("Identidade máx. (%)", 0, 100, int(saved.get("imax", 100)),
-                               help=HELP["poa2_imax"])
+        imin = _field(st.number_input, "Identidade mín. (%)", 0, 100,
+                      record=int(saved.get("imin", 60)), key="poa2_imin_w",
+                      help=HELP["poa2_imin"])
+        imax = _field(st.number_input, "Identidade máx. (%)", 0, 100,
+                      record=int(saved.get("imax", 100)), key="poa2_imax_w",
+                      help=HELP["poa2_imax"])
     with c3:
-        mmatch = st.number_input("% de sequências com match (-m)", 0, 100, int(saved.get("m", 60)),
-                                 help=HELP["poa2_m"])
+        mmatch = _field(st.number_input, "% de sequências com match (-m)", 0, 100,
+                        record=int(saved.get("m", 60)), key="poa2_m_w", help=HELP["poa2_m"])
         st.metric("Limiar aplicado (t)", f"{op_value} {t_value}%")
-        identity_filter = st.checkbox(
-            "Usar o limiar também como filtro", value=bool(saved.get("idf", False)),
-            help=HELP["poa2_idf"])
+        identity_filter = _field(st.checkbox, "Usar o limiar também como filtro",
+                                 record=bool(saved.get("idf", False)), key="poa2_idf_w",
+                                 help=HELP["poa2_idf"])
 
     requested_symbol = ">=" if objective == "conserved" else "<"
     mismatch = (source.origin != "unknown"
