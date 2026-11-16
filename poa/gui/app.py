@@ -118,6 +118,9 @@ def _init_state():
     ss.setdefault("poa0_regions", [])      # regions of the chosen protein
     ss.setdefault("poa0_entry", None)      # the chosen protein's UniProt entry, to avoid refetching
     ss.setdefault("poa0_structures", [])   # structures covering the chosen protein
+    # 'reference' (-f, step 1) or 'comparison' (the species' diversity set, step 4) — the same
+    # fetch serves both and only the user knows which one this one is.
+    ss.setdefault("poa0_destination", "reference")
     ss.setdefault("cons_mode_local", True)  # step 4: local reimplementation vs. manual CSV upload
     # one *list* of files per method (b2/b3/p/n/x) so several species can be analysed together;
     # 'm' (MHC-II) stays a single directory of Protein_Specie.html files
@@ -595,6 +598,27 @@ def _poa0_search_panel():
             st.caption("A estrutura baixada aqui já vem com o mapeamento SIFTS gravado no "
                        "relatório, que é o que a etapa 7 usa para acertar a numeração dos resíduos.")
 
+        st.divider()
+        # The same fetch serves two different roles, and nothing in the sequence says which one
+        # it is: a reference is what the epitopes were predicted *on*, a comparison set is what
+        # they are scored *against*. Sending a diversity set into -f would make POA1 predict on
+        # every isolate; sending the reference into the comparison set would leave the denominator
+        # at one protein, which is the case that cannot discriminate at any threshold.
+        destinations = {
+            "reference": "Referência do POA1 (`-f`, etapa 1)",
+            "comparison": "Conjunto de comparação da conservância (etapa 4)",
+        }
+        destination = st.radio("Esta sequência entra como", list(destinations),
+                               format_func=destinations.get, horizontal=True,
+                               key="poa0_destination", help=HELP["poa0_destination"])
+        specie_key = dbsearch.sanitize_token(token_specie).upper()
+        if destination == "comparison":
+            existing = ss.comparison_sets.get(specie_key)
+            have = len(backend.parse_fasta_headers(existing)) if existing else 0
+            st.caption(f"↳ Vai somar ao conjunto de **{specie_key}**, que hoje tem "
+                       f"{have} proteína(s). Gere quantas quiser — cada acesso entra uma vez, "
+                       "e o conjunto aparece pronto na etapa 4.")
+
         if st.button("⬇️ Gerar o FASTA", type="primary",
                      disabled=not (token_name and token_specie)):
             args = SimpleNamespace(
@@ -609,30 +633,57 @@ def _poa0_search_panel():
                 return
 
             fasta = report["arquivos"]["fasta"]
-            # Adopted exactly like an upload, so the rest of step 1 — the header table, the
-            # ambiguous-residue check, the merge into -f — treats it identically.
-            if fasta not in ss.ref_raw:
-                ss.ref_raw = list(ss.ref_raw) + [fasta]
-            # POA0 writes these itself rather than going through save_upload, so they are recorded
-            # here — otherwise reopening the analysis would have to guess what they are from a
-            # name POA0 composed ('<PROT>_<SPECIE>.fasta' looks like any other FASTA).
-            backend.record_input(ctx, fasta, role="reference",
-                                 original_name=Path(fasta).name)
+            if destination == "reference":
+                # Adopted exactly like an upload, so the rest of step 1 — the header table, the
+                # ambiguous-residue check, the merge into -f — treats it identically.
+                if fasta not in ss.ref_raw:
+                    ss.ref_raw = list(ss.ref_raw) + [fasta]
+                # POA0 writes these itself rather than going through save_upload, so they are
+                # recorded here — otherwise reopening the analysis would have to guess what they
+                # are from a name POA0 composed (it looks like any other FASTA).
+                backend.record_input(ctx, fasta, role="reference",
+                                     original_name=Path(fasta).name)
+            else:
+                # Accumulated into the one file step 4 reads for this species. merge_fastas
+                # deduplicates by ID, so fetching the same accession twice is a no-op rather than
+                # a doubled denominator, and it refuses two records that claim one ID with
+                # different sequences instead of letting one quietly win.
+                target = ctx.inputs_dir / f"comparison_{specie_key}.fasta"
+                previous = [str(target)] if target.is_file() else []
+                try:
+                    backend.merge_fastas(previous + [fasta], str(target))
+                except ValueError as exc:
+                    st.error(f"Não consegui somar ao conjunto de {specie_key}: {exc}")
+                    return
+                ss.comparison_sets[specie_key] = str(target)
+                backend.record_input(ctx, target, role="comparison_set", specie=specie_key,
+                                     original_name=target.name)
             if report["arquivos"].get("estrutura"):
                 ss.pdb_path = report["arquivos"]["estrutura"]
                 backend.record_input(ctx, ss.pdb_path, role="structure",
                                      original_name=Path(ss.pdb_path).name)
 
-            st.success(f"`{Path(fasta).name}` gerado: {report['sequencia']['tamanho']} aa, "
-                       f"cabeçalho `{report['cabecalho']}`.")
+            if destination == "reference":
+                st.success(f"`{Path(fasta).name}` gerado: {report['sequencia']['tamanho']} aa, "
+                           f"cabeçalho `{report['cabecalho']}`.")
+            else:
+                total = len(backend.parse_fasta_headers(str(target)))
+                st.success(f"`{report['cabecalho']}` ({report['sequencia']['tamanho']} aa) somado "
+                           f"ao conjunto de comparação de **{specie_key}**, que agora tem "
+                           f"**{total} proteína(s)** em `{target.name}`.")
+                if total < 2:
+                    st.warning("Com uma proteína só o limiar não discrimina nada — a conservância "
+                               "só pode dar 0% ou 100%. Gere mais acessos desta espécie antes de "
+                               "rodar a etapa 4.")
             if report["arquivos"].get("estrutura"):
                 info = report["estrutura"]["cabecalho"]
                 st.info(f"Estrutura `{report['estrutura']['pdb_id']}` baixada e já carregada na "
                         f"etapa 7: {info.get('molecule', '?')} · {info.get('organism', '?')}")
             for warning in report.get("avisos", []):
                 st.warning(warning)
-            st.caption("Deixe a caixa de inverter cabeçalhos **desmarcada** abaixo: o POA0 já "
-                       "grava no formato `Proteína_Espécie_ID`.")
+            if destination == "reference":
+                st.caption("Deixe a caixa de inverter cabeçalhos **desmarcada** abaixo: o POA0 já "
+                           "grava no formato `Proteína_Espécie_ID`.")
 
 
 def step_inputs():

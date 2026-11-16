@@ -35,6 +35,15 @@ HELP = {
         "epítopo à sua sequência de referência, então use a mesma sigla em todas as proteínas da "
         "mesma espécie. Também não pode conter `_`."
     ),
+    "poa0_destination": (
+        "**Referência** é a proteína em que os epítopos foram (ou serão) preditos — ela entra no "
+        "`-f` da etapa 1 e é sobre ela que as posições dos epítopos são lidas. **Conjunto de "
+        "comparação** é o *world set* contra o qual a conservância mede: várias cepas/isolados da "
+        "mesma espécie, somados num arquivo só. Os dois papéis são diferentes — mandar o conjunto "
+        "de diversidade para o `-f` faria o POA1 predizer em cada isolado, e usar só a referência "
+        "como comparação deixa o denominador em uma proteína, caso em que nenhum limiar "
+        "discrimina."
+    ),
     "poa0_structure": (
         "Baixa a estrutura escolhida do RCSB e grava junto o mapeamento SIFTS — a correspondência "
         "exata entre os resíduos da sequência e a numeração que o arquivo usa. É isso que permite "

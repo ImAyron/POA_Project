@@ -245,7 +245,7 @@ Troque o nome por qualquer outro vírus. `-s "Zika virus"` dá o táxon 64320 e,
 
 Confira três coisas em `results\teste_poa0\`:
 
-1. `GcHead_OROV.fasta` — **222 aa**, cabeçalho `>GcHead_OROV_A0A0D4BSW3` (três campos:
+1. `GcHead_OROV_A0A0D4BSW3.fasta` — **222 aa**, cabeçalho `>GcHead_OROV_A0A0D4BSW3` (três campos:
    proteína, espécie, acessão).
 2. `structure_6H3X.pdb` — baixado do RCSB.
 3. `POA0_relatorio.json` — procedência. O campo `estrutura.sifts.pdb_start` deve ser **482**
@@ -256,7 +256,7 @@ Confira três coisas em `results\teste_poa0\`:
 
 ```powershell
 .venv\Scripts\python.exe POA0_v1.0.py -a A0A0D4BSW3 -r 6H3X --nome GcHead --sigla OROV -d results\teste_pdbid
-Compare-Object (Get-Content results\teste_poa0\GcHead_OROV.fasta) (Get-Content results\teste_pdbid\GcHead_OROV.fasta)
+Compare-Object (Get-Content results\teste_poa0\GcHead_OROV_A0A0D4BSW3.fasta) (Get-Content results\teste_pdbid\GcHead_OROV_A0A0D4BSW3.fasta)
 ```
 
 O `Compare-Object` não deve imprimir nada — os arquivos são idênticos.
@@ -270,7 +270,7 @@ código **0** quando a estrutura serve e **1** quando não serve.
 
 ```powershell
 .venv\Scripts\python.exe tools\check_structure.py -p results\teste_poa0\structure_6H3X.pdb `
-                                                  -f results\teste_poa0\GcHead_OROV.fasta -c A
+                                                  -f results\teste_poa0\GcHead_OROV_A0A0D4BSW3.fasta -c A
 ```
 
 Esperado: `POLYPROTEIN · OROPOUCHE VIRUS`, **100,0% de identidade**, 221 resíduos observados,

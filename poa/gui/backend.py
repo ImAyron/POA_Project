@@ -669,8 +669,11 @@ def _classify_legacy_input(name: str) -> Tuple[str, str]:
     for stem, role, method in _LEGACY_INPUT_PATTERNS:
         if lowered.startswith((f"{stem}_", f"{stem}.")):
             return role, method
-    # POA0 writes '<PROT>_<SPECIE>.fasta' with no prefix of its own, and a hand-named reference
-    # looks the same; both are references, which is the only role an unprefixed FASTA has here.
+    # POA0 writes '<PROT>_<SPECIE>_<ACCESSION>.fasta' with no prefix of its own, and a hand-named
+    # reference looks the same; both are references, which is the only role an unprefixed FASTA
+    # has here. A set the POA0 panel built for the conservancy is *not* unprefixed — it is written
+    # as 'comparison_<SPECIE>.fasta' and caught by the stem above, which is what keeps a diversity
+    # set from coming back as a '-f' reference and being predicted on.
     if lowered.endswith((".fasta", ".fa", ".faa")):
         return "reference", ""
     return "", ""
