@@ -17,18 +17,18 @@ python -m venv .venv
 
 > O `pyTMHMM` é o **único** pacote instalado separadamente (conforme `TESTING_WSL.md`), porque seu
 > build nativo bloquearia a instalação básica no Windows. Sem ele, as etapas 1 a 4 e o painel de
-> filtros da etapa 5 funcionam; o botão de executar a topologia fica desabilitado. Todo o resto —
-> inclusive o `py3Dmol` da visualização 3D — vem no `requirements.txt`.
+> filtros da etapa 5 funcionam; o botão de executar a topologia fica desabilitado. Todo o resto
+> vem no `requirements.txt`.
 
 Confira:
 
 ```powershell
-.venv\Scripts\python.exe -c "import pandas, Bio, streamlit, plotly, py3Dmol; print('ok')"
+.venv\Scripts\python.exe -c "import pandas, Bio, streamlit, plotly; print('ok')"
 ```
 
-Se esse comando falhar em `py3Dmol`, o ambiente foi montado antes de o visualizador 3D existir ou
-pacote a pacote; rode o `pip install -r requirements.txt` de novo. As etapas 1 a 6 funcionam sem
-ele — só a estrutura 3D da etapa 7 não renderiza.
+Se esse comando falhar, o ambiente foi montado pacote a pacote; rode o
+`pip install -r requirements.txt` de novo. A visualização 3D da etapa 7 não tem pacote Python
+próprio: é uma página que carrega o 3Dmol.js no navegador, então só precisa de internet.
 
 ---
 
@@ -341,11 +341,28 @@ etapa 7. Envie `results\08102026-TESTANDO\inputs\structure_4C23.pdb`. Deve acont
    recusado é a afirmação de que aqueles resíduos são os epítopos.
 
 Depois envie `results\teste_poa0\structure_6H3X.pdb` numa análise cuja referência seja
-`GcHead_OROV.fasta`: aí sim os epítopos aparecem em vermelho, com uma faixa verde dizendo
+`GcHead_OROV_A0A0D4BSW3.fasta`: aí sim os epítopos aparecem destacados, com uma faixa verde dizendo
 quantos foram mapeados, a identidade e por qual método.
 
-> A etapa 7 precisa de internet para desenhar (o 3Dmol.js vem de um CDN) e do `py3Dmol`
-> instalado. A verificação em si não precisa de nenhum dos dois — por isso o
+Com as duas estruturas na análise, confira o que a etapa 7 faz além de desenhar:
+
+1. **Trocar de estrutura.** O campo **Estrutura em uso** lista as duas; alternar entre elas refaz a
+   verificação e o destaque sem enviar nada de novo. Em **Adicionar estrutura** dá para enviar um
+   `.pdb`/`.cif`, baixar outra entrada do PDB pelo identificador de quatro caracteres, ou buscar
+   pela proteína (quando o cabeçalho da referência traz o accession do UniProt) — tudo entra na
+   mesma lista. Feche a análise e reabra: a estrutura que estava em uso é a que volta.
+2. **Identificar as regiões.** Cada trecho destacado tem um nome (`R1`, `R2`, …) escrito sobre a
+   estrutura, na legenda à direita e na tabela **Regiões destacadas** abaixo, que traz a posição
+   na sequência e a numeração do PDB lado a lado. Passar o mouse sobre um resíduo diz qual é e a
+   que região pertence; clicar numa linha da legenda aproxima daquela região.
+3. **Recortar.** Em **Recorte**, escolha `um intervalo de resíduos` ou `só as regiões destacadas e
+   a vizinhança`: o resto da estrutura some. Na barra do visualizador, **Corte frontal** e **Corte
+   traseiro** fatiam a estrutura em profundidade — gire para escolher por onde o corte passa — e
+   **Sem corte** desfaz.
+4. **Salvar PNG** grava a vista atual, com rótulos e recorte.
+
+> A etapa 7 precisa de internet para desenhar (o 3Dmol.js vem de um CDN); sem ela, o painel diz
+> isso em vez de ficar vazio. A verificação em si não precisa de internet — por isso o
 > `tools\check_structure.py` funciona offline.
 
 ---
