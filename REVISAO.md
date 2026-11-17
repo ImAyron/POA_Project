@@ -1,3 +1,75 @@
+# Filtro de tamanho que alcança todos os métodos, e a seleção do POA2 em CSV — 17/11/2026
+
+PR empilhado sobre o #7 (base `feat/step7-structures-regions-and-field-state`, não a
+`feature/viz-realdata`): a correção depende do `_field` que está lá. Suíte: de 626 para **653
+passando**, no Windows (`.venv`) e no ambiente conda `poa` da WSL.
+
+Os dois defeitos vêm do mesmo relato de uso: *"coloquei o filtro de 5aa e aparecem epítopos
+menores consolidados"* e *"coloquei o filtro de 80% de identidade, na representação gráfica
+aparecem os valores ideais, mas no CSV aparece tudo"*.
+
+## O filtro de tamanho não alcançava o NetCTL nem o MHC-II
+
+`-bmin`/`-pmin`/`-xmin` limitam **cada um o seu método**. O NetCTL (`-n`) e o MHC-II (`-m`) não
+têm parâmetro de tamanho nenhum: os ramos deles em `consolidate_predictions` nunca receberam um,
+e `build_poa1_args` nem chegava a definir um. Um mínimo informado pelos campos existentes jamais
+os alcançava — e os campos se chamam "Bepipred min", "PAP min", "Outros min", de modo que
+preencher um deles parece pedir um piso de tamanho para a análise.
+
+Medido na análise `results/15112026-TESTE_15_11`, que usa PAP/IMED + MHC-II, refazendo a
+consolidação com três valores de `-pmin`:
+
+| `-pmin` | total | MHC-II | PAP/IMED |
+|---|---|---|---|
+| 0  | 892 | 677 (15–15 aa) | 215 (6–88 aa) |
+| 5  | 892 | 677 | 215 |
+| 16 | 723 | **677, todos de 15 aa — abaixo do mínimo pedido** | 46 |
+
+Com `-pmin 16` o filtro cortou o PAP/IMED de 215 para 46 e deixou intactos os 677 peptídeos de
+15 aa do MHC-II, cada um deles abaixo do mínimo que fora pedido.
+
+`-lmin`/`-lmax` valem para todos os métodos. São aplicados **depois** de cada parser, para que os
+limites por método mantenham o significado exato que têm hoje; os dois tipos se somam, e o que
+prevalece é o critério mais restritivo. O export por método (`-e`) recebe o mesmo filtro: ele é
+escrito a partir dos quadros por método, que o filtro geral não tocaria, e sem isso a planilha
+contradiria as demais saídas da mesma execução — a mesma classe de defeito que o alinhamento do
+`-e` corrigiu no PR anterior.
+
+A leitura é `getattr(args, "lmin", 0)`, então um namespace anterior a estes argumentos — a CLI de
+um script antigo, um `poa1_manifest.json` já gravado — continua funcionando.
+
+Na etapa 1 os dois campos ficam numa linha própria, abaixo dos três pares por método, e a
+legenda diz de quem é cada um. A interface também **avisa** quando um limite por método foi
+definido numa análise que inclui NetCTL ou MHC-II sem limite geral: é o erro exato que gerou o
+relato, dito ao lado dos dois campos em vez de descoberto três etapas depois, numa tabela ainda
+cheia de epítopos curtos.
+
+## O CSV que mostrava tudo
+
+Não era um filtro sendo ignorado. Os CSVs da etapa 4 são a **entrada** do POA2:
+`conservancy_rows` escreve uma linha por epítopo, e o limiar de identidade só decide o que a
+coluna *percent of protein sequence matches* conta — nenhuma linha é descartada ali, em limiar
+nenhum. Quem descarta é o POA2, e a saída dele era apenas `.xlsx`.
+
+Daí o relato: o único CSV de uma análise era o não filtrado, então apertar o filtro e abrir "o
+CSV" mostrava o conjunto inteiro, ao lado de gráficos — a barra *Com match* da etapa 4, o funil
+da etapa 5 — que mostravam corretamente o que sobrevive. Lido como resultado, o arquivo parece um
+filtro que não funcionou.
+
+A etapa 4 passa a dizer o que seus arquivos são, no ponto em que são baixados, e o rótulo do
+botão traz "(todos os epítopos)". A etapa 6 oferece a seleção do POA2 também em `.csv`, ao lado
+da planilha. A geração vive em `backend.results_csv`, não na página, porque o proto do
+`st.download_button` não carrega os bytes e o conteúdo não seria testável pelo `AppTest`; é
+UTF-8 **com BOM**, sem o qual o Excel no Windows lê o arquivo como cp1252 e estropia os acentos
+dos nomes de epítopo.
+
+## Testes
+
+27 novos, em `tests/test_length_filter.py` e `tests/test_filtered_outputs.py`. Entre eles um que
+fixa o comportamento por método — `-xmin` não alcança o NetCTL, e isso é de propósito — ao lado
+dos que provam que `-lmin` alcança; o aviso da etapa 1 em suas três situações; e o round-trip do
+CSV com acentos.
+
 # Etapa 7 com várias estruturas, regiões nomeadas e recorte — e o campo que perdia a segunda mudança — 16/11/2026
 
 Trabalho feito sobre a `feature/viz-realdata`, depois dos PRs #5 e #6. Suíte: de 544 para **626
