@@ -27,6 +27,13 @@ def build_parser() -> argparse.ArgumentParser:
     required.add_argument("-x", help="Prediction in others web servers (in FASTA format)", type=str, default="")
     optional.add_argument("-xmin", help="Min. Length (MERS) of the results predicted in others web servers  (default = None)", type=int, default=0)
     optional.add_argument("-xmax", help="Max. Length (MERS) of the results predicted in others web servers  (default = None)", type=int, default=0)
+    optional.add_argument("-lmin", type=int, default=0,
+                          help="Min. Length (MERS) of the predicted epitopes of EVERY method, "
+                               "including -n and -m, which have no bound of their own "
+                               "(default = 0, no minimum). Applied on top of -bmin/-pmin/-xmin.")
+    optional.add_argument("-lmax", type=int, default=0,
+                          help="Max. Length (MERS) of the predicted epitopes of EVERY method "
+                               "(default = 0, no maximum). Applied on top of -bmax/-pmax/-xmax.")
     required.add_argument("-d", help="Directory for analysis results", required="True", type=str, default="")
     required.add_argument("-f", help="Polyproteins/proteins used in predictions analysis in fasta format", required="True", type=str, default="")
     optional.add_argument("-e", help="Analysis results in .xlsx format (y/n)", type=str, default="n")

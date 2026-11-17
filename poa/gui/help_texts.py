@@ -73,12 +73,27 @@ HELP = {
         "MHC-II) já sai na ordem do `-f`, porque é dele que foi gerado."
     ),
     "len_min": (
-        "Comprimento mínimo, em resíduos, para um epítopo deste método ser mantido. "
-        "**0 desliga o filtro.** Útil para descartar fragmentos curtos demais para serem alvos."
+        "Comprimento mínimo, em resíduos, para um epítopo **deste método** ser mantido. "
+        "**0 desliga o filtro.** Útil para descartar fragmentos curtos demais para serem alvos.\n\n"
+        "Vale só para este método. Para valer em todos — inclusive NetCTL e MHC-II, que não têm "
+        "campo próprio — use o filtro geral logo abaixo."
     ),
     "len_max": (
-        "Comprimento máximo, em resíduos, para um epítopo deste método ser mantido. "
-        "**0 desliga o filtro.**"
+        "Comprimento máximo, em resíduos, para um epítopo **deste método** ser mantido. "
+        "**0 desliga o filtro.** Para valer em todos os métodos, use o filtro geral abaixo."
+    ),
+    "len_min_all": (
+        "Comprimento mínimo, em resíduos, para um epítopo ser mantido — **de qualquer método**. "
+        "**0 desliga o filtro.**\n\n"
+        "É o único filtro de tamanho que alcança o **NetCTL** e o **MHC-II**: eles não têm "
+        "parâmetro de comprimento próprio, então um mínimo informado só nos campos por método "
+        "acima deixava passar todos os epítopos curtos vindos desses dois.\n\n"
+        "Aplicado **depois** dos filtros por método, somando-se a eles: o resultado é sempre o "
+        "critério mais restritivo dos dois."
+    ),
+    "len_max_all": (
+        "Comprimento máximo, em resíduos, para um epítopo ser mantido — **de qualquer método**. "
+        "**0 desliga o filtro.** Aplicado junto do mínimo geral, depois dos filtros por método."
     ),
     "mhla": (
         "Classe do alelo HLA considerada na triagem do resultado do MHC-II: DR, DP ou DQ. "

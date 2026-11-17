@@ -64,7 +64,7 @@ def main(argv=None):
 
         poa1_args = SimpleNamespace(
             b2=pr.b2_json, b3="", bmin=0, bmax=0, p="", pmin=0, pmax=0,
-            n="", m="", mhla="DR", mic=50, x="", xmin=0, xmax=0,
+            n="", m="", mhla="DR", mic=50, x="", xmin=0, xmax=0, lmin=0, lmax=0,
             d=vdir, f=pr.reference_fasta, e="y",
         )
         r1 = run_poa1(poa1_args)

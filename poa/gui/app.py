@@ -804,6 +804,9 @@ def step_inputs():
     st.subheader("Parâmetros de filtragem (opcionais)")
     saved = ss.params_poa1
     classes = ["DR", "DP", "DQ"]
+    st.caption("Os três pares abaixo valem **cada um para o seu método**. O NetCTL e o MHC-II não "
+               "têm par próprio — para eles, e para valer em todos de uma vez, use o filtro geral "
+               "logo adiante.")
     c1, c2, c3 = st.columns(3)
     with c1:
         bmin = _field(st.number_input, "Bepipred min (bmin)", 0, 100,
@@ -820,6 +823,36 @@ def step_inputs():
                       record=int(saved.get("xmin", 0)), key="poa1_xmin_w", help=HELP["len_min"])
         xmax = _field(st.number_input, "Outros max (xmax)", 0, 100,
                       record=int(saved.get("xmax", 0)), key="poa1_xmax_w", help=HELP["len_max"])
+
+    st.markdown("**Comprimento do epítopo — todos os métodos**")
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        lmin = _field(st.number_input, "Mínimo geral (lmin)", 0, 100,
+                      record=int(saved.get("lmin", 0)), key="poa1_lmin_w",
+                      help=HELP["len_min_all"])
+    with g2:
+        lmax = _field(st.number_input, "Máximo geral (lmax)", 0, 100,
+                      record=int(saved.get("lmax", 0)), key="poa1_lmax_w",
+                      help=HELP["len_max_all"])
+    with g3:
+        st.caption("Alcança **todos** os métodos, inclusive NetCTL e MHC-II. 0 desliga.")
+    if lmin and lmax and lmin > lmax:
+        st.error(f"O mínimo geral ({lmin}) é maior que o máximo geral ({lmax}) — nenhum epítopo "
+                 "cabe nessa faixa e o POA1 vai produzir uma tabela vazia.")
+
+    # The exact mistake this field exists for: a per-method bound was set, methods it cannot
+    # reach are in the run, and the general bound is off. Said here, next to both, rather than
+    # discovered three steps later in a table still full of short epitopes.
+    _UNBOUNDED = {"n": "NetCTL", "m": "MHC-II"}
+    active_unbounded = [name for key, name in _UNBOUNDED.items() if key in _collect_sources()]
+    if active_unbounded and not (lmin or lmax) and any((bmin, bmax, pmin, pmax, xmin, xmax)):
+        st.warning(
+            "Você definiu um limite de comprimento por método, mas "
+            + " e ".join(active_unbounded) +
+            " também está nesta análise e **não é alcançado por nenhum** dos campos acima — os "
+            "epítopos desse método entram na tabela consolidada com qualquer tamanho. Use o "
+            "mínimo/máximo geral para que o limite valha para todos.")
+
     c4, c5, c6 = st.columns(3)
     with c4:
         mhla = _field(st.selectbox, "Classe HLA (MHC-II)", classes,
@@ -833,6 +866,7 @@ def step_inputs():
                         record=saved.get("e", "n") == "y", key="poa1_export_w")
 
     ss.params_poa1 = dict(bmin=bmin, bmax=bmax, pmin=pmin, pmax=pmax, xmin=xmin, xmax=xmax,
+                          lmin=lmin, lmax=lmax,
                           mhla=mhla, mic=mic, e="y" if export else "n")
     # Step 1 as it now stands, so reopening this analysis finds it rather than the defaults. The
     # FASTA list is a *selection*: the uploader replaces ss.ref_raw rather than adding to it, and
@@ -1478,13 +1512,23 @@ def step_conservancy():
                        title="Epítopos por espécie e quantos têm match"),
                 width="stretch")
 
+        # What these files are, stated where they are downloaded. The threshold never removes a
+        # row here — it only decides what the "percent of matches" column counts — so the CSV
+        # legitimately holds every epitope at any threshold, while the chart above and the funnel
+        # in step 5 show what survives filtering. Read as a result, it looks like the filter was
+        # ignored.
+        st.info("**Estes CSVs são a entrada do POA2, não o resultado filtrado.** Eles trazem "
+                "sempre *todos* os epítopos: o limiar de identidade não descarta linhas aqui, "
+                "só define o que a coluna de % de matches conta. Quem descarta é o POA2 (etapa "
+                "5), com os filtros de identidade e de % de matches — o resultado filtrado está "
+                "na **etapa 6**, para baixar em `.xlsx` ou `.csv`.")
         for c in csvs:
             with st.expander(f"📄 {c.name}"):
                 try:
                     st.dataframe(pd.read_csv(c), width="stretch", height=300)
                 except (OSError, ValueError, pd.errors.ParserError) as exc:
                     st.warning(f"Não foi possível ler {c.name}: {exc}")
-                _download(c, f"⬇️ {c.name}", "text/csv")
+                _download(c, f"⬇️ {c.name} (todos os epítopos)", "text/csv")
 
         st.caption("Gravados em:")
         st.code(str(ctx.conservancy_csv_dir), language=None)
@@ -1786,6 +1830,16 @@ def step_results():
         st.subheader("Downloads")
         _download(Path(ss.poa2_result.xlsx_path), "⬇️ Planilha POA2 (.xlsx)",
                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        # The same selection as the spreadsheet, in the format the conservancy inputs arrive in.
+        # Until now the only CSVs in an analysis were the unfiltered ones of step 4, so "the CSV"
+        # meant the input — and a filtered run had no CSV to compare it against.
+        st.download_button(
+            "⬇️ Epítopos selecionados (.csv)",
+            data=backend.results_csv(df),
+            file_name=Path(ss.poa2_result.xlsx_path).with_suffix(".csv").name,
+            mime="text/csv")
+        st.caption(f"O `.xlsx` e o `.csv` trazem os mesmos {len(df)} epítopo(s) que passaram pelos "
+                   "filtros do POA2. Os CSVs da etapa 4 são a entrada, com todos os epítopos.")
         if ss.poa2_result.fasta_path:
             _download(Path(ss.poa2_result.fasta_path), "⬇️ FASTA POA2 (.fasta)", "text/plain")
 
